@@ -1,0 +1,96 @@
+pub fn get_demo(name: &str) -> Option<(&'static str, Vec<String>)> {
+    match name.to_lowercase().as_str() {
+        "counter" => Some(("Counter Demo", vec![
+            "OUT \"Starting Counter Demo...\"".into(),
+            "MOV A, 0".into(),
+            "loop:".into(),
+            "  OUT \"Count: \", cont".into(),
+            "  OUT A".into(),
+            "  INC A".into(),
+            "  CMP A, 5".into(),
+            "  JLE loop".into(),
+            "OUT \"Done!\"".into(),
+            "HLT".into(),
+        ])),
+        "fibonacci" => Some(("Fibonacci Sequence", vec![
+            "OUT \"Fibonacci Sequence:\"".into(),
+            "MOV A, 0".into(),
+            "MOV B, 1".into(),
+            "MOV C, 10".into(),
+            "fib_loop:".into(),
+            "  OUT A".into(),
+            "  MOV D, A".into(),
+            "  ADD D, B".into(),
+            "  MOV A, B".into(),
+            "  MOV B, D".into(),
+            "  DEC C".into(),
+            "  JNZ fib_loop".into(),
+            "HLT".into(),
+        ])),
+        "jingle_bells" => Some(("Jingle Bells Audio Demo", vec![
+            "OUT \"Playing Jingle Bells...\"".into(),
+            "ATONE 330, 200".into(),
+            "ATONE 0, 50".into(),
+            "ATONE 330, 200".into(),
+            "ATONE 0, 50".into(),
+            "ATONE 330, 400".into(),
+            "ATONE 0, 100".into(),
+            "ATONE 330, 200".into(),
+            "ATONE 0, 50".into(),
+            "ATONE 330, 200".into(),
+            "ATONE 0, 50".into(),
+            "ATONE 330, 400".into(),
+            "ATONE 0, 100".into(),
+            "ATONE 330, 200".into(),
+            "ATONE 392, 200".into(),
+            "ATONE 261, 300".into(),
+            "ATONE 294, 100".into(),
+            "ATONE 330, 800".into(),
+            "APLAY".into(),
+            "OUT \"Song buffer loaded!\"".into(),
+            "HLT".into(),
+        ])),
+        "framebuffer" | "graphics" => Some(("Framebuffer Graphics Demo", vec![
+            "OUT \"Rendering Graphics...\"".into(),
+            "FBMODE 1".into(),
+            "FBCLR 0xFF051009".into(),
+            // Blue header
+            "FBRECT 10, 10, 220, 20, 0xFF1A5276".into(),
+            // Green box
+            "FBRECT 20, 40, 60, 40, 0xFF1E8449".into(),
+            // Red box
+            "FBRECT 90, 40, 60, 40, 0xFF922B21".into(),
+            // Yellow box
+            "FBRECT 160, 40, 60, 40, 0xFFB7950B".into(),
+            // Diagonal crossing lines
+            "FBLINE 10, 90, 230, 125, 0xFFF39C12".into(),
+            "FBLINE 10, 125, 230, 90, 0xFF9B59B6".into(),
+            "FBSWAP".into(),
+            "OUT \"Graphics rendered successfully!\"".into(),
+            "HLT".into(),
+        ])),
+        "interrupt" | "timer" => Some(("Hardware Timer / Interrupt Demo", vec![
+            "IVEC TIMER, onTimer".into(),
+            "TIMER 60".into(),
+            "MOV [100], 0".into(),
+            "loop:".into(),
+            "  CMP [100], 5".into(),
+            "  JL loop".into(),
+            "VBLANK OFF".into(),
+            "OUT \"Timer reached target frame count: 5!\"".into(),
+            "HLT".into(),
+            "onTimer:".into(),
+            "  MOV D, [100]".into(),
+            "  INC D".into(),
+            "  MOV [100], D".into(),
+            "  OUT \"Frame tick: \", cont".into(),
+            "  OUT D".into(),
+            "  IRET".into(),
+        ])),
+        _ => None,
+    }
+}
+
+pub fn list_demos() -> &'static [&'static str] {
+    &["counter", "fibonacci", "jingle_bells", "graphics", "timer"]
+}

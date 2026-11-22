@@ -1,0 +1,280 @@
+use std::env;
+use std::fs;
+use std::io::{self, BufRead, Write};
+use siliconcraft_emulator::{demos, VirtualCpu, State};
+
+fn print_help() {
+    println!("SiliconCraft Virtual CPU Emulator");
+    println!("Usage: siliconcraft-emulator [OPTIONS] <file.o | file.asm>");
+    println!();
+    println!("Options:");
+    println!("  --demo <name>             Run a built-in demo ({})", demos::list_demos().join(", "));
+    println!("  --list-demos              List available built-in demos");
+    println!("  --step                    Interactive single-step debugger mode");
+    println!("  --cycles <N>              Limit execution to N cycles (default: 10,000,000)");
+    println!("  --dump-regs               Print CPU registers and flags after execution");
+    println!("  --dump-ram <start> <num>  Dump RAM contents from <start> for <num> words");
+    println!("  --dump-fb                 Display ANSI ASCII view of the 240x135 framebuffer");
+    println!("  --save-fb <output.ppm>    Save framebuffer image to a PPM file");
+    println!("  --save-audio <output.wav> Save generated audio samples to an 8kHz 8-bit WAV file");
+    println!("  --help, -h                Show this help message");
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() <= 1 {
+        print_help();
+        return;
+    }
+
+    let mut file_path: Option<String> = None;
+    let mut demo_name: Option<String> = None;
+    let mut step_mode = false;
+    let mut max_cycles: usize = 10_000_000;
+    let mut dump_regs = false;
+    let mut dump_ram: Option<(usize, usize)> = None;
+    let mut dump_fb = false;
+    let mut save_fb: Option<String> = None;
+    let mut save_audio: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--list-demos" => {
+                println!("Available Demos:");
+                for d in demos::list_demos() {
+                    if let Some((desc, _)) = demos::get_demo(d) {
+                        println!("  - {:<15} {}", d, desc);
+                    }
+                }
+                return;
+            }
+            "--demo" => {
+                if i + 1 < args.len() {
+                    demo_name = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --demo requires a demo name");
+                    return;
+                }
+            }
+            "--step" => {
+                step_mode = true;
+            }
+            "--cycles" => {
+                if i + 1 < args.len() {
+                    max_cycles = args[i + 1].parse().unwrap_or(max_cycles);
+                    i += 1;
+                }
+            }
+            "--dump-regs" => {
+                dump_regs = true;
+            }
+            "--dump-ram" => {
+                if i + 2 < args.len() {
+                    let start = args[i + 1].parse().unwrap_or(0);
+                    let count = args[i + 2].parse().unwrap_or(64);
+                    dump_ram = Some((start, count));
+                    i += 2;
+                }
+            }
+            "--dump-fb" => {
+                dump_fb = true;
+            }
+            "--save-fb" => {
+                if i + 1 < args.len() {
+                    save_fb = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--save-audio" => {
+                if i + 1 < args.len() {
+                    save_audio = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                file_path = Some(arg.to_string());
+            }
+            unknown => {
+                eprintln!("Unknown argument: {}", unknown);
+                print_help();
+                return;
+            }
+        }
+        i += 1;
+    }
+
+    let (_title, source_lines) = if let Some(demo) = demo_name {
+        if let Some((desc, lines)) = demos::get_demo(&demo) {
+            println!("=== SiliconCraft Demo: {} ===", desc);
+            (desc.to_string(), lines)
+        } else {
+            eprintln!("Unknown demo '{}'. Run with --list-demos to see available demos.", demo);
+            return;
+        }
+    } else if let Some(path) = file_path {
+        println!("=== Loading Program: {} ===", path);
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                (path, lines)
+            }
+            Err(e) => {
+                eprintln!("Failed to read file '{}': {}", path, e);
+                return;
+            }
+        }
+    } else {
+        eprintln!("Error: No program file or demo specified.");
+        print_help();
+        return;
+    };
+
+    let mut cpu = VirtualCpu::new(262_144); // 1024 KB RAM
+    cpu.load_program(&source_lines);
+    cpu.power_on();
+
+    println!("SoC Synthesized: 71 opcodes, {} program lines loaded.", cpu.program.len());
+    println!("Starting execution...\n------------------------------------------------");
+
+    if step_mode {
+        run_interactive_debugger(&mut cpu);
+    } else {
+        let mut executed = 0;
+        let batch_size = 5000;
+        while cpu.state == State::Running && executed < max_cycles {
+            cpu.tick(batch_size);
+            executed += batch_size;
+
+            // Print any new terminal lines
+            while !cpu.terminal_output.is_empty() {
+                let line = cpu.terminal_output.remove(0);
+                println!("{}", line);
+            }
+        }
+    }
+
+    // Flush remaining terminal output
+    cpu.flush_line_buffer();
+    while !cpu.terminal_output.is_empty() {
+        let line = cpu.terminal_output.remove(0);
+        println!("{}", line);
+    }
+
+    println!("------------------------------------------------");
+    println!("Execution finished in {} cycles. Final State: {:?}", cpu.cycles, cpu.state);
+
+    if dump_regs || step_mode {
+        println!("\n=== Register Dump ===");
+        println!("  A:     {:10} (0x{:08X})", cpu.reg_a, cpu.reg_a);
+        println!("  B:     {:10} (0x{:08X})", cpu.reg_b, cpu.reg_b);
+        println!("  C:     {:10} (0x{:08X})", cpu.reg_c, cpu.reg_c);
+        println!("  D:     {:10} (0x{:08X})", cpu.reg_d, cpu.reg_d);
+        println!("  PC:    {:10} (0x{:08X})", cpu.pc, cpu.pc);
+        println!("  FLAGS: Z={} S={}", cpu.flag_z, cpu.flag_s);
+        println!("  DataStack: {:?}", cpu.data_stack);
+        println!("  CallStack: {:?}", cpu.call_stack);
+    }
+
+    if let Some((start, count)) = dump_ram {
+        println!("\n=== RAM Dump [{}..{}] ===", start, start + count);
+        print!("{}", cpu.ram.dump(start, count));
+    }
+
+    if dump_fb || cpu.framebuffer.mode() == 1 {
+        println!("\n=== Framebuffer ASCII View (240x135) ===");
+        print!("{}", cpu.framebuffer.render_ascii());
+    }
+
+    if let Some(ppm_path) = save_fb {
+        match cpu.framebuffer.save_ppm(&ppm_path) {
+            Ok(_) => println!("Framebuffer image saved to: {}", ppm_path),
+            Err(e) => eprintln!("Failed to save framebuffer to '{}': {}", ppm_path, e),
+        }
+    }
+
+    if let Some(wav_path) = save_audio {
+        let samples = cpu.audio.recorded_samples();
+        if samples.is_empty() {
+            println!("No audio samples were generated during execution.");
+        } else {
+            match siliconcraft_emulator::AudioSubsystem::save_wav(&wav_path, samples) {
+                Ok(_) => println!("Audio ({} samples, {} ms) saved to: {}", samples.len(), samples.len() * 1000 / 8000, wav_path),
+                Err(e) => eprintln!("Failed to save audio to '{}': {}", wav_path, e),
+            }
+        }
+    }
+}
+
+fn run_interactive_debugger(cpu: &mut VirtualCpu) {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut line = String::new();
+
+    println!("[Interactive Debugger] Commands: (Enter)=Step, c=Continue, r=Registers, m <addr>=Memory, q=Quit");
+
+    while cpu.state == State::Running || cpu.state == State::Paused {
+        let current_line = if cpu.pc < cpu.program.len() {
+            &cpu.program[cpu.pc]
+        } else {
+            "[END OF PROGRAM]"
+        };
+
+        print!("[PC:{:04}] {:<35} | A:{:<5} B:{:<5} C:{:<5} D:{:<5} Z:{} S:{} > ",
+            cpu.pc, current_line.trim(), cpu.reg_a, cpu.reg_b, cpu.reg_c, cpu.reg_d,
+            if cpu.flag_z { '1' } else { '0' },
+            if cpu.flag_s { '1' } else { '0' },
+        );
+        io::stdout().flush().unwrap();
+
+        line.clear();
+        if reader.read_line(&mut line).is_err() {
+            break;
+        }
+        let cmd = line.trim();
+
+        match cmd {
+            "q" | "quit" | "exit" => {
+                println!("Exiting debugger.");
+                break;
+            }
+            "c" | "continue" => {
+                while cpu.state == State::Running {
+                    cpu.tick(1000);
+                    while !cpu.terminal_output.is_empty() {
+                        let out = cpu.terminal_output.remove(0);
+                        println!("  [OUT] {}", out);
+                    }
+                }
+                break;
+            }
+            "r" | "regs" => {
+                println!("Registers: A={:X} B={:X} C={:X} D={:X} PC={} Flags: Z={} S={}",
+                    cpu.reg_a, cpu.reg_b, cpu.reg_c, cpu.reg_d, cpu.pc, cpu.flag_z, cpu.flag_s);
+                println!("DataStack: {:?}", cpu.data_stack);
+                println!("CallStack: {:?}", cpu.call_stack);
+            }
+            m if m.starts_with('m') => {
+                let parts: Vec<&str> = m.split_whitespace().collect();
+                let addr: usize = if parts.len() > 1 {
+                    parts[1].parse().unwrap_or(0)
+                } else {
+                    0
+                };
+                print!("{}", cpu.ram.dump(addr, 16));
+            }
+            _ => {
+                cpu.step();
+                while !cpu.terminal_output.is_empty() {
+                    let out = cpu.terminal_output.remove(0);
+                    println!("  [OUT] {}", out);
+                }
+            }
+        }
+    }
+}

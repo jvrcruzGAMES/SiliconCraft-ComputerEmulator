@@ -1,0 +1,8 @@
+[package]
+name = "siliconcraft-emulator"
+version = "0.1.0"
+edition = "2021"
+authors = ["SiliconCraft"]
+description = "High-performance emulator for the SiliconCraft Virtual CPU architecture"
+
+[dependencies]
