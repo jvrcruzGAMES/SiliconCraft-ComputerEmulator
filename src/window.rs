@@ -64,7 +64,7 @@ impl EmulatorWindow {
         }
 
         if self.cpu.framebuffer.mode() == 1 {
-            // --- Framebuffer Mode (240x135 rendered 2x2 to 480x270) ---
+            // --- Framebuffer Mode (480x270 1:1 into virtual frame) ---
             for fy in 0..FB_HEIGHT {
                 for fx in 0..FB_WIDTH {
                     let c = self.cpu.framebuffer.get_pixel(fx as i32, fy as i32);
@@ -74,13 +74,7 @@ impl EmulatorWindow {
                     let a = ((c >> 24) & 0xFF) as u8;
                     let alpha = if a == 0 { 255 } else { a };
 
-                    let vx = fx * 2;
-                    let vy = fy * 2;
-
-                    Self::set_pixel(frame, vx, vy, (r, g, b, alpha));
-                    Self::set_pixel(frame, vx + 1, vy, (r, g, b, alpha));
-                    Self::set_pixel(frame, vx, vy + 1, (r, g, b, alpha));
-                    Self::set_pixel(frame, vx + 1, vy + 1, (r, g, b, alpha));
+                    Self::set_pixel(frame, fx, fy, (r, g, b, alpha));
                 }
             }
         } else {

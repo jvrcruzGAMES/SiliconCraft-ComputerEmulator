@@ -11,7 +11,37 @@ impl NCompiler {
         let mut next_ram_addr = 0;
         let mut label_counter = 1;
 
-        let mut func_stack: Vec<(String, String)> = Vec::new(); // (func_name, end_label)
+        let mut func_stack: Vec<(String, String, bool)> = Vec::new(); // (func_name, end_label, is_interrupt)
+
+        let mut interrupt_handlers = std::collections::HashSet::new();
+        for sl in source_lines {
+            let stripped = Assembler::strip_comments(sl);
+            let l = stripped.trim();
+            if l.is_empty() { continue; }
+            if l.starts_with("on_") && l.ends_with(')') {
+                if let Some(op) = l.find('(') {
+                    let h = l[op+1..l.len()-1].trim();
+                    if !h.is_empty() { interrupt_handlers.insert(h.to_lowercase()); }
+                }
+            } else if (l.starts_with("catch(") || l.starts_with("catch ")) && l.ends_with(')') {
+                if let Some(op) = l.find('(') {
+                    let inner = l[op+1..l.len()-1].trim();
+                    let parts: Vec<&str> = inner.split(',').collect();
+                    if parts.len() == 2 {
+                        interrupt_handlers.insert(parts[1].trim().to_lowercase());
+                    }
+                }
+            } else if let Some(space) = l.find(' ') {
+                let first = l[..space].trim().to_uppercase();
+                if first == "IVEC" {
+                    let rest = l[space+1..].trim();
+                    let parts: Vec<&str> = rest.split(',').collect();
+                    if parts.len() == 2 {
+                        interrupt_handlers.insert(parts[1].trim().to_lowercase());
+                    }
+                }
+            }
+        }
         let mut if_stack: Vec<String> = Vec::new(); // end_label
         let mut while_stack: Vec<(String, String)> = Vec::new(); // (start_label, end_label)
 
@@ -59,9 +89,14 @@ impl NCompiler {
 
             // Closing brace: }
             if line == "}" {
-                if let Some((_fname, end_lbl)) = func_stack.pop() {
-                    if assembly.last().map(|s| s.as_str()) != Some("RET") {
-                        assembly.push("RET".to_string());
+                if let Some((_fname, end_lbl, is_interrupt)) = func_stack.pop() {
+                    let last_str = assembly.last().map(|s| s.as_str());
+                    if last_str != Some("RET") && last_str != Some("IRET") && last_str != Some("HLT") {
+                        if is_interrupt {
+                            assembly.push("IRET".to_string());
+                        } else {
+                            assembly.push("RET".to_string());
+                        }
                     }
                     assembly.push(format!("{}:", end_lbl));
                 } else if let Some((start_lbl, end_lbl)) = while_stack.pop() {
@@ -96,9 +131,9 @@ impl NCompiler {
                 continue;
             }
 
-            // Function declaration: fn name(...) {
-            if (line.starts_with("fn ") || line.starts_with("function ")) && line.ends_with('{') {
-                let start_idx = if line.starts_with("fn ") { 3 } else { 9 };
+            // Function declaration: fn name(...) { or func or function
+            if (line.starts_with("fn ") || line.starts_with("func ") || line.starts_with("function ") || line.starts_with("def ")) && line.ends_with('{') {
+                let start_idx = if line.starts_with("fn ") { 3 } else if line.starts_with("func ") { 5 } else if line.starts_with("def ") { 4 } else { 9 };
                 let rest = &line[start_idx..line.len() - 1].trim();
                 let func_name = if let Some(paren) = rest.find('(') {
                     rest[..paren].trim()
@@ -111,18 +146,25 @@ impl NCompiler {
 
                 assembly.push(format!("JMP {}", end_label));
                 assembly.push(format!("{}:", func_name));
-                func_stack.push((func_name.to_string(), end_label));
+                let is_interrupt = interrupt_handlers.contains(&func_name.to_lowercase());
+                func_stack.push((func_name.to_string(), end_label, is_interrupt));
                 i += 1;
                 continue;
             }
 
             // Return statement: return or return expr
             if line == "return" || line.starts_with("return ") {
-                let expr = if line.starts_with("return ") { line[7..].trim() } else { "" };
-                if !expr.is_empty() {
-                    Self::compile_assignment("A", expr, &var_map, &mut assembly)?;
+                if func_stack.is_empty() {
+                    assembly.push("HLT".to_string());
+                } else if func_stack.last().map(|f| f.2).unwrap_or(false) {
+                    assembly.push("IRET".to_string());
+                } else {
+                    let expr = if line.starts_with("return ") { line[7..].trim() } else { "" };
+                    if !expr.is_empty() {
+                        Self::compile_assignment("A", expr, &var_map, &mut assembly)?;
+                    }
+                    assembly.push("RET".to_string());
                 }
-                assembly.push("RET".to_string());
                 i += 1;
                 continue;
             }

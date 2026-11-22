@@ -16,7 +16,7 @@ fn print_help() {
     println!("  --cycles <N>              Limit execution to N cycles (default: 10,000,000)");
     println!("  --dump-regs               Print CPU registers and flags after execution");
     println!("  --dump-ram <start> <num>  Dump RAM contents from <start> for <num> words");
-    println!("  --dump-fb                 Display ANSI ASCII view of the 240x135 framebuffer");
+    println!("  --dump-fb                 Display ANSI ASCII view of the 480x270 framebuffer");
     println!("  --save-fb <output.ppm>    Save framebuffer image to a PPM file");
     println!("  --save-audio <output.wav> Save generated audio samples to an 8kHz 8-bit WAV file");
     println!("  --help, -h                Show this help message");
@@ -239,7 +239,7 @@ fn main() {
     }
 
     if dump_fb {
-        println!("\n=== Framebuffer ASCII View (240x135) ===");
+        println!("\n=== Framebuffer ASCII View (480x270) ===");
         print!("{}", cpu.framebuffer.render_ascii());
     }
 

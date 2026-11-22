@@ -399,3 +399,33 @@ fn test_emulator_window_creation() {
     // Verify EmulatorWindow initializes correctly with the CPU
     let _win = siliconcraft_emulator::EmulatorWindow::new(cpu);
 }
+
+#[test]
+fn test_reset_interrupt_and_ram_preservation() {
+    let program = vec![
+        "IVEC RESET, on_reset".to_string(),
+        "MOV [100], 42".to_string(),
+        "HLT".to_string(),
+        "on_reset:".to_string(),
+        "MOV A, [100]".to_string(),
+        "MOV [101], A".to_string(),
+        "IRET".to_string(),
+    ];
+    let mut cpu = VirtualCpu::default();
+    cpu.load_program_lines(&program).expect("Program should load");
+    cpu.execute_cycles(20);
+
+    assert_eq!(cpu.state, State::Halted);
+    assert_eq!(cpu.ram.read(100), Ok(42));
+    assert_eq!(cpu.ram.read(101), Ok(0));
+
+    // Reset CPU
+    cpu.reset();
+
+    // RAM must persist across reset
+    assert_eq!(cpu.ram.read(100), Ok(42));
+
+    // Execute cycles: reset interrupt handler must run and copy [100] -> [101]
+    cpu.execute_cycles(20);
+    assert_eq!(cpu.ram.read(101), Ok(42));
+}

@@ -1,12 +1,12 @@
 use std::fs::File;
 use std::io::Write;
 
-pub const FB_WIDTH: usize = 240;
-pub const FB_HEIGHT: usize = 135;
+pub const FB_WIDTH: usize = 480;
+pub const FB_HEIGHT: usize = 270;
 
 #[derive(Debug, Clone)]
 pub struct Framebuffer {
-    pixels: [u32; FB_WIDTH * FB_HEIGHT],
+    pixels: Vec<u32>,
     dirty: bool,
     mode: i32, // 0 = text mode, 1 = framebuffer mode
 }
@@ -14,7 +14,7 @@ pub struct Framebuffer {
 impl Framebuffer {
     pub fn new() -> Self {
         Self {
-            pixels: [0xFF051009; FB_WIDTH * FB_HEIGHT], // Dark SiliconCraft CRT background
+            pixels: vec![0xFF051009; FB_WIDTH * FB_HEIGHT], // Dark SiliconCraft CRT background
             dirty: false,
             mode: 0,
         }
@@ -142,8 +142,8 @@ impl Framebuffer {
     pub fn render_ascii(&self) -> String {
         let mut out = String::new();
         // Downscale to 60 columns x 30 lines
-        const SCALE_X: usize = 4;
-        const SCALE_Y: usize = 4;
+        const SCALE_X: usize = 8;
+        const SCALE_Y: usize = 9;
         let out_w = FB_WIDTH / SCALE_X;
         let out_h = FB_HEIGHT / SCALE_Y;
 

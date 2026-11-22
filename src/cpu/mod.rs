@@ -47,6 +47,7 @@ pub const VEC_KEYBOARD: i32 = 10;
 pub const VEC_MOUSE_MOVE: i32 = 11;
 pub const VEC_MOUSE_CLICK: i32 = 12;
 pub const VEC_TIMER: i32 = 13;
+pub const VEC_RESET: i32 = 14;
 
 pub struct VirtualCpu {
     pub reg_a: i32,
@@ -347,14 +348,12 @@ impl VirtualCpu {
         self.data_stack.clear();
         self.interrupt_stack.clear();
         self.interrupt_queue.clear();
-        self.ivt.clear();
         self.interrupts_enabled = true;
         self.in_interrupt_handler = false;
         self.sleep_ticks_remaining = 0;
         self.timer_hz = 0;
         self.timer_interval_cycles = 0;
         self.pad_states = [0; 4];
-        self.ram.clear();
         self.terminal_output.clear();
         self.line_buffer.clear();
         self.framebuffer.clear(0xFF051009);
@@ -372,6 +371,7 @@ impl VirtualCpu {
         if self.state != State::Off {
             self.state = State::Running;
         }
+        self.queue_reset_interrupt();
     }
 
     pub fn power_on(&mut self) {
@@ -382,6 +382,7 @@ impl VirtualCpu {
     pub fn power_off(&mut self) {
         self.flush_line_buffer();
         self.state = State::Off;
+        self.audio.clear();
         self.terminal_output.push("[POWER OFF]".to_string());
     }
 
@@ -413,6 +414,22 @@ impl VirtualCpu {
     pub fn update_flags(&mut self, result: i32) {
         self.flag_z = result == 0;
         self.flag_s = result < 0;
+    }
+
+    pub fn queue_reset_interrupt(&mut self) {
+        for event in &self.interrupt_queue {
+            if event.vector == VEC_RESET {
+                return;
+            }
+        }
+        if self.interrupt_queue.len() < 64 {
+            self.interrupt_queue.push_front(InterruptEvent {
+                vector: VEC_RESET,
+                reg_a: 0,
+                reg_b: 0,
+                reg_c: 0,
+            });
+        }
     }
 
     pub fn queue_timer_interrupt(&mut self) {
@@ -685,6 +702,7 @@ impl VirtualCpu {
             "MOUSE_MOVE" | "MOUSE_POS" => Ok(VEC_MOUSE_MOVE),
             "MOUSE_CLICK" | "CLICK" => Ok(VEC_MOUSE_CLICK),
             "TIMER" | "VBLANK" | "VBL" | "NMI" | "FRAME" => Ok(VEC_TIMER),
+            "RESET" | "RST" => Ok(VEC_RESET),
             _ => self.resolve_value(token),
         }
     }
