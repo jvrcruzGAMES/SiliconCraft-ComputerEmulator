@@ -1,15 +1,17 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
-use siliconcraft_emulator::{demos, VirtualCpu, State};
+use std::path::Path;
+use siliconcraft_emulator::{demos, VirtualCpu, State, ProjectResolver, NCompiler, run_emulator_window};
 
 fn print_help() {
     println!("SiliconCraft Virtual CPU Emulator");
-    println!("Usage: siliconcraft-emulator [OPTIONS] <file.o | file.asm>");
+    println!("Usage: siliconcraft-emulator [OPTIONS] <file.o | file.asm | file.n | project_dir>");
     println!();
     println!("Options:");
     println!("  --demo <name>             Run a built-in demo ({})", demos::list_demos().join(", "));
     println!("  --list-demos              List available built-in demos");
+    println!("  --headless                Run in headless terminal mode without opening the Vulkan window");
     println!("  --step                    Interactive single-step debugger mode");
     println!("  --cycles <N>              Limit execution to N cycles (default: 10,000,000)");
     println!("  --dump-regs               Print CPU registers and flags after execution");
@@ -30,6 +32,7 @@ fn main() {
     let mut file_path: Option<String> = None;
     let mut demo_name: Option<String> = None;
     let mut step_mode = false;
+    let mut headless_mode = false;
     let mut max_cycles: usize = 10_000_000;
     let mut dump_regs = false;
     let mut dump_ram: Option<(usize, usize)> = None;
@@ -65,6 +68,9 @@ fn main() {
                     eprintln!("Error: --demo requires a demo name");
                     return;
                 }
+            }
+            "--headless" => {
+                headless_mode = true;
             }
             "--step" => {
                 step_mode = true;
@@ -115,22 +121,62 @@ fn main() {
 
     let (_title, source_lines) = if let Some(demo) = demo_name {
         if let Some((desc, lines)) = demos::get_demo(&demo) {
-            println!("=== SiliconCraft Demo: {} ===", desc);
             (desc.to_string(), lines)
         } else {
             eprintln!("Unknown demo '{}'. Run with --list-demos to see available demos.", demo);
             return;
         }
     } else if let Some(path) = file_path {
-        println!("=== Loading Program: {} ===", path);
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-                (path, lines)
+        let p = Path::new(&path);
+        if p.is_dir() {
+            match ProjectResolver::load_project_from_dir(p) {
+                Ok(files) => match ProjectResolver::compile_project(&files, None) {
+                    Ok(lines) => (path, lines),
+                    Err(e) => {
+                        eprintln!("Compilation failed: {}", e);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to read project directory '{}': {}", path, e);
+                    return;
+                }
             }
-            Err(e) => {
-                eprintln!("Failed to read file '{}': {}", path, e);
-                return;
+        } else {
+            let parent = p.parent().unwrap_or(Path::new("."));
+            let filename = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let parent_dir = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+            let mut resolved = None;
+            if let Ok(files) = ProjectResolver::load_project_from_dir(parent_dir) {
+                if files.contains_key(&filename) {
+                    if let Ok(lines) = ProjectResolver::compile_project(&files, Some(&filename)) {
+                        resolved = Some((path.clone(), lines));
+                    }
+                }
+            }
+            if let Some(res) = resolved {
+                res
+            } else {
+                match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let raw_lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                        if path.ends_with(".n") {
+                            match NCompiler::compile(&raw_lines) {
+                                Ok(compiled) => (path, compiled),
+                                Err(err) => {
+                                    eprintln!("Compilation failed: {}", err);
+                                    return;
+                                }
+                            }
+                        } else {
+                            (path, raw_lines)
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to read file '{}': {}", path, e);
+                        return;
+                    }
+                }
             }
         }
     } else {
@@ -139,16 +185,12 @@ fn main() {
         return;
     };
 
-    let mut cpu = VirtualCpu::new(262_144); // 1024 KB RAM
-    cpu.load_program(&source_lines);
-    cpu.power_on();
-
-    println!("SoC Synthesized: 71 opcodes, {} program lines loaded.", cpu.program.len());
-    println!("Starting execution...\n------------------------------------------------");
+    let mut cpu = VirtualCpu::default(); // 4 sticks of RAM: 4096 KB (1,048,576 words)
+    cpu.burn_to_rom(&source_lines); // Code burned to non-volatile ROM
 
     if step_mode {
         run_interactive_debugger(&mut cpu);
-    } else {
+    } else if headless_mode {
         let mut executed = 0;
         let batch_size = 5000;
         while cpu.state == State::Running && executed < max_cycles {
@@ -161,6 +203,11 @@ fn main() {
                 println!("{}", line);
             }
         }
+    } else {
+        if let Err(e) = run_emulator_window(cpu) {
+            eprintln!("Vulkan window error: {}", e);
+        }
+        return;
     }
 
     // Flush remaining terminal output
@@ -170,8 +217,9 @@ fn main() {
         println!("{}", line);
     }
 
-    println!("------------------------------------------------");
-    println!("Execution finished in {} cycles. Final State: {:?}", cpu.cycles, cpu.state);
+    if let State::Error(ref err) = cpu.state {
+        eprintln!("{}", err);
+    }
 
     if dump_regs || step_mode {
         println!("\n=== Register Dump ===");
@@ -190,7 +238,7 @@ fn main() {
         print!("{}", cpu.ram.dump(start, count));
     }
 
-    if dump_fb || cpu.framebuffer.mode() == 1 {
+    if dump_fb {
         println!("\n=== Framebuffer ASCII View (240x135) ===");
         print!("{}", cpu.framebuffer.render_ascii());
     }

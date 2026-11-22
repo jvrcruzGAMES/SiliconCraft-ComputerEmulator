@@ -1,3 +1,5 @@
+pub mod n_compiler;
+pub mod project;
 pub mod instruction;
 pub mod assembler;
 
@@ -80,10 +82,12 @@ pub struct VirtualCpu {
     pub framebuffer: Framebuffer,
     pub audio: AudioSubsystem,
 
+    pub rom: Vec<String>,
     pub program: Vec<String>,
     pub compiled_program: Vec<CompiledInstruction>,
     pub labels: HashMap<String, usize>,
     pub data_labels: HashMap<String, usize>,
+    pub supported_instructions: std::collections::HashSet<String>,
     start_time: Instant,
 }
 
@@ -130,19 +134,93 @@ impl VirtualCpu {
             framebuffer: Framebuffer::new(),
             audio: AudioSubsystem::new(),
 
+            rom: Vec::new(),
             program: Vec::new(),
             compiled_program: Vec::new(),
             labels: HashMap::new(),
             data_labels: HashMap::new(),
+            supported_instructions: {
+                let mut set = std::collections::HashSet::new();
+                for instr in [
+                    "NOP", "MOV", "ADD", "SUB", "MUL", "DIV", "MOD", "INC", "DEC", "CMP",
+                    "AND", "OR", "XOR", "NOT", "SHL", "SHR", "JMP", "JZ", "JNZ", "JS",
+                    "JNS", "JL", "JLE", "JG", "JGE", "CALL", "RET", "PUSH", "POP", "PUSHA",
+                    "POPA", "IVEC", "IRET", "CLI", "STI", "INT", "OUT", "OUTH", "OUTC",
+                    "CLS", "SLEEP", "TIME", "RAND", "INPAD", "TIMER", "SETTIMER", "VBLANK",
+                    "SSIZE", "SREAD", "SWRITE", "SBLKR", "SBLKW", "SCOUNT", "SSEL", "SDRV",
+                    "SEXEC", "SBOOT", "FBMODE", "DMODE", "FBSET", "PIX", "FBGET", "FBCLR",
+                    "FCLR", "FBRECT", "RECT", "FBLINE", "LINE", "FBLIT", "FBSWAP", "FBWIDTH",
+                    "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
+                    "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
+                ] {
+                    set.insert(instr.to_string());
+                }
+                set
+            },
             start_time: Instant::now(),
         }
     }
 
     pub fn load_program(&mut self, source_lines: &[String]) {
-        self.program = source_lines.to_vec();
+        self.rom = source_lines.to_vec();
+        self.program = self.rom.clone();
         self.preprocess_labels();
         self.compile_bytecode();
         self.power_on();
+    }
+
+    pub fn burn_to_rom<T: AsRef<str>>(&mut self, source_lines: &[T]) {
+        let lines: Vec<String> = source_lines.iter().map(|s| s.as_ref().to_string()).collect();
+        self.load_program(&lines);
+    }
+
+    pub fn is_code_burned_to_rom(&self) -> bool {
+        !self.rom.is_empty()
+    }
+
+    pub fn rom(&self) -> &[String] {
+        &self.rom
+    }
+
+    pub fn has_nvme(&self) -> bool {
+        self.storage.has_nvme()
+    }
+
+    pub fn extension_slot_1_is_nvme(&self) -> bool {
+        self.storage.is_nvme_slot_1()
+    }
+
+    pub fn ram_stick_count(&self) -> usize {
+        self.ram.stick_count()
+    }
+
+    pub fn ram_capacity_bytes(&self) -> usize {
+        self.ram.capacity_bytes()
+    }
+
+    pub fn ram_capacity_kb(&self) -> usize {
+        self.ram.capacity_kb()
+    }
+
+    pub fn enable_all_instructions(&mut self) {
+        for instr in [
+            "NOP", "MOV", "ADD", "SUB", "MUL", "DIV", "MOD", "INC", "DEC", "CMP",
+            "AND", "OR", "XOR", "NOT", "SHL", "SHR", "JMP", "JZ", "JNZ", "JS",
+            "JNS", "JL", "JLE", "JG", "JGE", "CALL", "RET", "PUSH", "POP", "PUSHA",
+            "POPA", "IVEC", "IRET", "CLI", "STI", "INT", "OUT", "OUTH", "OUTC",
+            "CLS", "SLEEP", "TIME", "RAND", "INPAD", "TIMER", "SETTIMER", "VBLANK",
+            "SSIZE", "SREAD", "SWRITE", "SBLKR", "SBLKW", "SCOUNT", "SSEL", "SDRV",
+            "SEXEC", "SBOOT", "FBMODE", "DMODE", "FBSET", "PIX", "FBGET", "FBCLR",
+            "FCLR", "FBRECT", "RECT", "FBLINE", "LINE", "FBLIT", "FBSWAP", "FBWIDTH",
+            "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
+            "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
+        ] {
+            self.supported_instructions.insert(instr.to_string());
+        }
+    }
+
+    pub fn is_instruction_supported(&self, name: &str) -> bool {
+        self.supported_instructions.contains(&name.to_uppercase())
     }
 
     pub fn load_program_lines<T: AsRef<str>>(&mut self, source_lines: &[T]) -> Result<(), String> {

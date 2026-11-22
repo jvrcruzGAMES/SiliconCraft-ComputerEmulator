@@ -4,7 +4,19 @@ pub struct Ram {
 }
 
 impl Ram {
-    pub const DEFAULT_SIZE: usize = 262_144; // 1024 KB (1,048,576 bytes / 4 bytes per i32 word)
+    /// Capacity of a single RAM stick in bytes: 1024 KB = 1,048,576 bytes
+    pub const RAM_STICK_BYTES: usize = 1024 * 1024;
+    /// Capacity of a single RAM stick in 32-bit words: 262,144 words
+    pub const RAM_STICK_WORDS: usize = Self::RAM_STICK_BYTES / 4;
+    /// Standard full complement: 4 sticks of RAM
+    pub const NUM_RAM_STICKS: usize = 4;
+    /// Full 4-stick capacity in bytes: 4096 KB (4 MB = 4,194,304 bytes)
+    pub const FOUR_STICKS_BYTES: usize = Self::NUM_RAM_STICKS * Self::RAM_STICK_BYTES;
+    /// Full 4-stick capacity in 32-bit words: 1,048,576 words
+    pub const FOUR_STICKS_WORDS: usize = Self::NUM_RAM_STICKS * Self::RAM_STICK_WORDS;
+
+    /// Default RAM capacity in emulator: 4 sticks of RAM (4096 KB / 1,048,576 words)
+    pub const DEFAULT_SIZE: usize = Self::FOUR_STICKS_WORDS;
 
     pub fn new(capacity_words: usize) -> Self {
         Self {
@@ -18,6 +30,18 @@ impl Ram {
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    pub fn capacity_bytes(&self) -> usize {
+        self.data.len() * 4
+    }
+
+    pub fn capacity_kb(&self) -> usize {
+        self.capacity_bytes() / 1024
+    }
+
+    pub fn stick_count(&self) -> usize {
+        self.data.len() / Self::RAM_STICK_WORDS
     }
 
     pub fn read(&self, addr: usize) -> Result<i32, String> {

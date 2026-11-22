@@ -1,26 +1,63 @@
 pub const MAX_DRIVES: usize = 4;
-pub const DEFAULT_DRIVE_CAPACITY: usize = 1024 * 1024 * 1024; // 1024 MB
+pub const DEFAULT_DRIVE_CAPACITY: usize = 1024 * 1024 * 1024; // 1024 MB (1,073,741,824 bytes)
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveType {
+    None,
+    Flash,
+    Nvme,
+}
 
 #[derive(Debug, Clone)]
 pub struct StorageSubsystem {
     drives: [Vec<u8>; MAX_DRIVES],
     capacities: [usize; MAX_DRIVES],
+    drive_types: [DriveType; MAX_DRIVES],
     drive_programs: [Vec<String>; MAX_DRIVES],
     selected_drive: usize,
+    has_nvme: bool,
 }
 
 impl StorageSubsystem {
-    pub const DEFAULT_DRIVE_CAPACITY: usize = 1024 * 1024 * 1024; // 1024 MB
+    pub const DEFAULT_DRIVE_CAPACITY: usize = DEFAULT_DRIVE_CAPACITY;
 
     pub fn new() -> Self {
         const EMPTY_VEC: Vec<u8> = Vec::new();
         const EMPTY_PROG: Vec<String> = Vec::new();
         Self {
             drives: [EMPTY_VEC; MAX_DRIVES],
-            capacities: [Self::DEFAULT_DRIVE_CAPACITY; MAX_DRIVES],
+            capacities: [DEFAULT_DRIVE_CAPACITY; MAX_DRIVES],
+            // Drive 0 is Flash; Drive 1 is Extension Slot 1: NVMe Drive (1024 MB)
+            drive_types: [DriveType::Flash, DriveType::Nvme, DriveType::None, DriveType::None],
             drive_programs: [EMPTY_PROG; MAX_DRIVES],
             selected_drive: 0,
+            has_nvme: true,
         }
+    }
+
+    pub fn has_nvme(&self) -> bool {
+        self.has_nvme || self.drive_types.iter().any(|&t| t == DriveType::Nvme)
+    }
+
+    pub fn drive_type(&self, drive: usize) -> DriveType {
+        if drive < MAX_DRIVES {
+            self.drive_types[drive]
+        } else {
+            DriveType::None
+        }
+    }
+
+    pub fn set_drive_type(&mut self, drive: usize, dtype: DriveType) {
+        if drive < MAX_DRIVES {
+            self.drive_types[drive] = dtype;
+            if dtype == DriveType::Nvme {
+                self.has_nvme = true;
+            }
+        }
+    }
+
+    pub fn is_nvme_slot_1(&self) -> bool {
+        self.drive_types[1] == DriveType::Nvme
     }
 
     pub fn attach_drive(&mut self, drive: usize, capacity_bytes: usize) {

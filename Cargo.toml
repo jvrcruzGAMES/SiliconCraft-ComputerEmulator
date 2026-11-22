@@ -6,3 +6,6 @@ authors = ["SiliconCraft"]
 description = "High-performance emulator for the SiliconCraft Virtual CPU architecture"
 
 [dependencies]
+pixels = "0.17.2"
+winit = "0.30.13"
+font8x8 = "0.3.1"
