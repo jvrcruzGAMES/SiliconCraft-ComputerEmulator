@@ -44,6 +44,10 @@ fn main() {
                 print_help();
                 return;
             }
+            "--version" | "-v" => {
+                println!("SiliconCraft Virtual CPU Emulator v0.1.0");
+                return;
+            }
             "--list-demos" => {
                 println!("Available Demos:");
                 for d in demos::list_demos() {
