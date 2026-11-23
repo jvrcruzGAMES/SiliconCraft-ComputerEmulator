@@ -5,6 +5,7 @@ pub mod instruction;
 pub mod assembler;
 pub mod peripheral;
 pub mod network;
+mod heap;
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -64,6 +65,8 @@ const INSTRUCTIONS: &[&str] = &[
     "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
     "PINFO", "PWRAP", "PCALL", "PCALLS", "PSTATUS", "PRESULT", "PSCAN",
     "NOPEN", "NSEND", "NRECV", "NCLOSE", "NHTTP", "NSTATUS", "NLEN", "NRESULT",
+    "NWSOPEN", "NWSTEXT", "NTLS", "NHTTP3", "NLISTEN", "NACCEPT", "NRESPOND",
+    "NRESPONDT", "NREADY", "NUTF8", "GALLOC",
     "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
 ];
 
@@ -851,30 +854,114 @@ impl VirtualCpu {
         use network::Request;
 
         let count = match opcode {
-            Opcode::NOPEN | Opcode::NSEND => 4,
-            Opcode::NRECV => 3,
-            Opcode::NCLOSE => 2,
-            Opcode::NHTTP => 5,
+            Opcode::NOPEN | Opcode::NSEND | Opcode::NWSTEXT => 4,
+            Opcode::NRECV | Opcode::NLISTEN => 3,
+            Opcode::NCLOSE | Opcode::NWSOPEN | Opcode::NTLS | Opcode::NACCEPT => 2,
+            Opcode::NHTTP | Opcode::NHTTP3 | Opcode::NRESPOND | Opcode::NRESPONDT => 5,
             _ => unreachable!(),
         };
-        let parts = instruction_args(args, count)?;
+        // NHTTP and NHTTP3 accept a trailing flag that selects a plain-text content type.
+        let with_text_flag = matches!(opcode, Opcode::NHTTP | Opcode::NHTTP3)
+            && Assembler::split_args(args, usize::MAX).len() == count + 1;
+        let parts = instruction_args(args, count + usize::from(with_text_flag))?;
         if self.network_port.status() != 0 {
             return self.set_destination(&parts[0], 0);
         }
 
         let value = |i: usize| self.resolve_value(&parts[i]);
-        let arg0 = value(1)?;
         let request = match opcode {
-            Opcode::NOPEN => Request::Open(arg0, self.read_guest_string(value(2)?, network::MAX_TEXT)?, value(3)?),
-            Opcode::NSEND => Request::Send(arg0, self.network_payload(value(2)?, value(3)?)?),
-            Opcode::NRECV => Request::Receive(arg0, value(2)?),
-            Opcode::NCLOSE => Request::Close(arg0),
-            Opcode::NHTTP => Request::Http(arg0, self.read_guest_string(value(2)?, network::MAX_TEXT)?,
-                self.network_payload(value(3)?, value(4)?)?),
+            Opcode::NOPEN => Request::Open(value(1)?, self.read_guest_string(value(2)?, network::MAX_TEXT)?, value(3)?),
+            Opcode::NSEND | Opcode::NWSTEXT => {
+                Request::Send(value(1)?, self.network_payload(value(2)?, value(3)?)?, opcode == Opcode::NWSTEXT)
+            }
+            Opcode::NRECV => Request::Receive(value(1)?, value(2)?),
+            Opcode::NCLOSE => Request::Close(value(1)?),
+            Opcode::NHTTP | Opcode::NHTTP3 => {
+                let text = with_text_flag && value(5)? != 0;
+                Request::Http(
+                    value(1)?,
+                    self.read_guest_string(value(2)?, network::MAX_TEXT)?,
+                    self.network_payload(value(3)?, value(4)?)?,
+                    text,
+                    opcode == Opcode::NHTTP3,
+                )
+            }
+            Opcode::NWSOPEN => Request::WebSocket(self.read_guest_string(value(1)?, network::MAX_TEXT)?),
+            Opcode::NTLS => Request::Tls(value(1)?),
+            Opcode::NLISTEN => Request::Listen(value(1)?, value(2)?),
+            Opcode::NACCEPT => Request::Accept(value(1)?),
+            Opcode::NRESPOND | Opcode::NRESPONDT => Request::Respond(
+                value(1)?,
+                value(2)?,
+                self.network_payload(value(3)?, value(4)?)?,
+                opcode == Opcode::NRESPONDT,
+            ),
             _ => unreachable!(),
         };
         self.network_port.submit(request);
         self.set_destination(&parts[0], 1)
+    }
+
+    /// `NUTF8 dst, source, count, target, capacity`: convert between guest strings and UTF-8 bytes.
+    fn transcode_network_text(&mut self, args: &str) -> Result<(), String> {
+        const LIMIT: i32 = -4;
+        let parts = instruction_args(args, 5)?;
+        let source = self.resolve_value(&parts[1])?;
+        let count = self.resolve_value(&parts[2])?;
+        let target = self.resolve_value(&parts[3])?;
+        let capacity = self.resolve_value(&parts[4])?;
+        let target_range = self.guest_range(target, capacity)?;
+        let limit = network::MAX_TRANSFER;
+        let result = if count == -1 {
+            match self.read_guest_string(source, limit) {
+                Ok(text) if text.len() <= limit && (capacity == 0 || text.len() <= capacity as usize) => {
+                    if capacity != 0 {
+                        let slots = &mut self.ram.as_mut_slice()[target_range];
+                        for (slot, byte) in slots.iter_mut().zip(text.bytes()) {
+                            *slot = i32::from(byte);
+                        }
+                    }
+                    text.len() as i32
+                }
+                _ => LIMIT,
+            }
+        } else if count < 0 || count as usize > limit {
+            LIMIT
+        } else {
+            let bytes = self.network_payload(source, count)?;
+            let units: Vec<u16> = String::from_utf8_lossy(&bytes).encode_utf16().collect();
+            if capacity != 0 && units.len() >= capacity as usize {
+                LIMIT
+            } else {
+                if capacity != 0 {
+                    let slots = &mut self.ram.as_mut_slice()[target_range];
+                    for (slot, unit) in slots.iter_mut().zip(units.iter().copied().chain([0])) {
+                        *slot = i32::from(unit);
+                    }
+                }
+                units.len() as i32
+            }
+        };
+        self.set_destination(&parts[0], result)
+    }
+
+    /// `GALLOC size, base`: allocate from the managed guest heap, or initialize it when size is 0.
+    fn guest_alloc(&mut self, args: &str) -> Result<(), String> {
+        let parts = instruction_args(args, 2)?;
+        let size = self.resolve_value(&parts[0])?;
+        let base = self.resolve_value(&parts[1])?;
+        if size == 0 {
+            heap::initialize(self.ram.as_mut_slice(), base)?;
+            self.reg_a = 0;
+            return Ok(());
+        }
+        let mut roots = vec![self.reg_a, self.reg_b, self.reg_c, self.reg_d];
+        roots.extend(self.data_stack.iter().copied());
+        for context in self.interrupt_stack.iter().filter(|context| context.restore_regs) {
+            roots.extend([context.reg_a, context.reg_b, context.reg_c, context.reg_d]);
+        }
+        self.reg_a = heap::allocate(self.ram.as_mut_slice(), base, size, &roots)?;
+        Ok(())
     }
 
     fn guest_range(&self, address: i32, length: i32) -> Result<std::ops::Range<usize>, String> {
@@ -1325,8 +1412,16 @@ impl VirtualCpu {
                 let value = self.peripheral_bus.take_result();
                 self.set_destination(&ci.raw_args, value)
             }
-            Opcode::NOPEN | Opcode::NSEND | Opcode::NRECV | Opcode::NCLOSE | Opcode::NHTTP =>
+            Opcode::NOPEN | Opcode::NSEND | Opcode::NRECV | Opcode::NCLOSE | Opcode::NHTTP
+            | Opcode::NWSOPEN | Opcode::NWSTEXT | Opcode::NTLS | Opcode::NHTTP3
+            | Opcode::NLISTEN | Opcode::NACCEPT | Opcode::NRESPOND | Opcode::NRESPONDT =>
                 self.submit_network(ci.opcode, &ci.raw_args),
+            Opcode::NREADY => {
+                let ready = i32::from(self.network_port.ready());
+                self.set_destination(&ci.raw_args, ready)
+            }
+            Opcode::NUTF8 => self.transcode_network_text(&ci.raw_args),
+            Opcode::GALLOC => self.guest_alloc(&ci.raw_args),
             Opcode::NSTATUS => self.set_destination(&ci.raw_args, self.network_port.status()),
             Opcode::NLEN => self.set_destination(&ci.raw_args, self.network_port.result_length()),
             Opcode::NRESULT => self.read_network_result(&ci.raw_args),

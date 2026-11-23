@@ -21,6 +21,9 @@ fn print_help() {
     println!("  --save-audio <output.wav> Save generated audio samples to an 8kHz 8-bit WAV file");
     println!("  --drive <slot:path>       Attach a persistent image to drive 0, 1, or 2");
     println!("  --allow-network <host:port> Permit guest networking to an exact endpoint (repeatable)");
+    println!("  --allow-listen <port>       Permit guest listeners on a local port (repeatable)");
+    println!("  --tls-cert <file.pem>       Certificate chain for guest HTTPS and WSS listeners");
+    println!("  --tls-key <file.pem>        Private key for guest HTTPS and WSS listeners");
     println!("  --help, -h                Show this help message");
 }
 
@@ -33,6 +36,9 @@ fn main() {
 
     let mut drive_images = Vec::new();
     let mut network_endpoints = Vec::new();
+    let mut listen_ports: Vec<u16> = Vec::new();
+    let mut tls_cert: Option<String> = None;
+    let mut tls_key: Option<String> = None;
     let mut file_path: Option<String> = None;
     let mut demo_name: Option<String> = None;
     let mut step_mode = false;
@@ -99,6 +105,22 @@ fn main() {
                     std::process::exit(2);
                 };
                 network_endpoints.push((host, port));
+                i += 1;
+            }
+            "--allow-listen" => {
+                let Some(port) = args.get(i + 1).and_then(|value| value.parse::<u16>().ok()).filter(|&p| p > 0) else {
+                    eprintln!("Error: --allow-listen requires a port from 1 to 65535");
+                    std::process::exit(2);
+                };
+                listen_ports.push(port);
+                i += 1;
+            }
+            "--tls-cert" | "--tls-key" => {
+                let Some(path) = args.get(i + 1) else {
+                    eprintln!("Error: {} requires a file path", args[i]);
+                    std::process::exit(2);
+                };
+                if args[i] == "--tls-cert" { tls_cert = Some(path.clone()) } else { tls_key = Some(path.clone()) }
                 i += 1;
             }
             "--headless" => {
@@ -240,6 +262,22 @@ fn main() {
     }
     for (host, port) in network_endpoints {
         cpu.network_port.allow(host, port);
+    }
+    for port in listen_ports {
+        cpu.network_port.allow_listen(port);
+    }
+    match (tls_cert, tls_key) {
+        (Some(cert), Some(key)) => {
+            if let Err(error) = cpu.network_port.set_server_tls(Path::new(&cert), Path::new(&key)) {
+                eprintln!("Could not load the TLS identity: {error}");
+                std::process::exit(1);
+            }
+        }
+        (None, None) => {}
+        _ => {
+            eprintln!("Error: --tls-cert and --tls-key must be used together");
+            std::process::exit(2);
+        }
     }
     cpu.burn_to_rom(&source_lines); // Code burned to non-volatile ROM
 

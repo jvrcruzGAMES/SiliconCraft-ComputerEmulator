@@ -10,5 +10,8 @@ pixels = "0.17.2"
 winit = "0.30.13"
 font8x8 = "0.3.1"
 sdl3 = { version = "0.22.1", features = ["build-from-source-static", "build-from-source-unix-console"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "http3", "rustls"] }
 tempfile = "3"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.12"

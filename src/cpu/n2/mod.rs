@@ -14,6 +14,12 @@ pub(super) fn compile_project(
     let source = source_root()?;
     let tmp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let driver = tmp.path().join("CompileN2.java");
+    let stub_dir = tmp.path().join("stubs");
+    fs::create_dir_all(&stub_dir).map_err(|error| error.to_string())?;
+    // The upstream NetworkPort drags in the server's HTTP/3 stack. The compiler only needs its constants.
+    let network_port = stub_dir.join("NetworkPort.java");
+    fs::write(&network_port, include_str!("NetworkPort.java")).map_err(|error| error.to_string())?;
+    install_resources(&source, tmp.path())?;
     let input = tmp.path().join("project.bin");
     fs::write(&driver, include_str!("CompileN2.java")).map_err(|error| error.to_string())?;
     write_project(&input, project).map_err(|error| error.to_string())?;
@@ -23,8 +29,7 @@ pub(super) fn compile_project(
         driver,
         source.join("compiler/InstructionValidator.java"),
         source.join("vm/PeripheralBus.java"),
-        source.join("vm/network/NetworkPort.java"),
-        source.join("vm/network/NetworkPolicy.java"),
+        network_port,
     ];
     for item in fs::read_dir(n2).map_err(|error| error.to_string())? {
         let path = item.map_err(|error| error.to_string())?.path();
@@ -55,6 +60,23 @@ pub(super) fn compile_project(
     }
     let output = String::from_utf8(assembly.stdout).map_err(|error| error.to_string())?;
     Ok(output.lines().map(str::to_owned).collect())
+}
+
+/// The N2 compiler links `network.n2` from the classpath, so ship the checkout's resources with it.
+fn install_resources(source: &Path, target: &Path) -> Result<(), String> {
+    let resources = source.join("../../../../resources/siliconcraft/n2");
+    let destination = target.join("siliconcraft/n2");
+    fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+    for item in fs::read_dir(&resources)
+        .map_err(|error| format!("N2 library resources not found at {}: {error}", resources.display()))?
+    {
+        let path = item.map_err(|error| error.to_string())?.path();
+        if path.extension().is_some_and(|ext| ext == "n2") {
+            let name = path.file_name().expect("resource file name");
+            fs::copy(&path, destination.join(name)).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn source_root() -> Result<PathBuf, String> {

@@ -39,7 +39,8 @@ A high-performance, cycle-accurate standalone emulator and toolchain for the **S
   - Storage Subsystem: `SSIZE`, `SREAD`, `SWRITE`, `SBLKR`, `SBLKW`, `SCOUNT`, `SSEL`, `SDRV`, `SEXEC` (three installed drives at 2 GiB each)
   - Color Framebuffer (960x540): `FBMODE`, `FBSET`, `FBGET`, `FBCLR`, `FBRECT`, `FBLINE`, `FBLIT`, `FBSWAP`, `FBWIDTH`, `FBHEIGHT`
   - Peripherals: `PSCAN`, `PINFO`, `PWRAP`, `PCALL`, `PCALLS`, `PSTATUS`, `PRESULT`. Embedders can attach devices by address through the Rust `Peripheral` trait.
-  - Networking: `NOPEN`, `NSEND`, `NRECV`, `NCLOSE`, `NHTTP`, `NSTATUS`, `NLEN`, `NRESULT`. TCP, UDP and HTTP(S) are available for explicitly enabled host and port pairs.
+  - Networking: `NOPEN`, `NSEND`, `NRECV`, `NCLOSE`, `NHTTP`, `NHTTP3`, `NWSOPEN`, `NWSTEXT`, `NTLS`, `NLISTEN`, `NACCEPT`, `NRESPOND`, `NRESPONDT`, `NSTATUS`, `NLEN`, `NRESULT`, `NREADY`, `NUTF8`. TCP, UDP, SMTP/IMAP (plain or TLS), HTTP(S), HTTP/3 and WebSocket clients work for explicitly enabled host and port pairs. TCP, UDP, HTTP(S) and WebSocket listeners work on ports enabled with `--allow-listen`.
+  - Managed Guest Heap: `GALLOC size, base` (conservative mark-and-sweep allocator used by compiled N2 programs)
   - Audio Synthesizer: `APUSH`, `ABUFW`, `ACLR`, `ASTAT`, `ATONE`, `APLAY` (8000 Hz 8-bit unsigned PCM)
   - I/O & Timers: `OUT`, `OUTH`, `OUTC`, `CLS`, `SLEEP`, `TIME`, `RAND`, `INPAD`
 - **Integrated High-Level Toolchain & Multi-File Project Resolver**:
@@ -98,6 +99,8 @@ siliconcraft-emulator [OPTIONS] <file.o | file.asm | file.n | file.n2 | project_
 - `--headless`: Run in headless terminal mode without opening the Vulkan window
 - `--drive <slot:path>` attaches a persistent image to drive 0, 1 or 2. For example, `--drive 1:nvme.img`.
 - `--allow-network <host:port>` enables guest networking for an exact endpoint. Repeat the flag for multiple endpoints.
+- `--allow-listen <port>` lets the guest open a listener on a local port (`NLISTEN`). Repeat the flag for multiple ports.
+- `--tls-cert <file.pem>` and `--tls-key <file.pem>` supply the certificate chain and private key for HTTPS and secure WebSocket listeners.
 - `--step`: Run in interactive single-step debugger mode in terminal
 - `--cycles <N>`: Maximum execution cycle limit (default: 10,000,000)
 - `--dump-regs`: Print CPU registers (A, B, C, D, PC, FLAGS, Stacks) upon completion
