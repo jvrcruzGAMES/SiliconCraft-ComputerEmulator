@@ -142,7 +142,12 @@ siliconcraft-emulator --demo counter --step
 
 ## Publishing a release
 
-Push a version tag from the commit you want to release. For example, use
+In GitHub, open **Actions → Release emulator → Run workflow**, select the
+branch or ref to build, and enter a tag such as `v0.1.0`. Once both builds
+pass, the workflow creates the tag at the built commit if needed. An existing
+tag can be used if it points to that same commit and has no release yet.
+
+You can also push a version tag from the commit you want to release. For example, use
 `git tag v0.1.0` followed by `git push origin v0.1.0` for a new tag.
 
 GitHub Actions tests and builds x86-64 binaries on Windows and Ubuntu 24.04,

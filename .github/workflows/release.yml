@@ -4,17 +4,38 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (for example, v0.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: emulator-release-${{ github.ref }}
+  group: emulator-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check tag name
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]] || ! git check-ref-format "refs/tags/$RELEASE_TAG"; then
+            echo "Enter a valid Git tag that starts with v."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: validate
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -75,16 +96,35 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
 
+      - name: Create or verify the tag at the built commit
+        run: |
+          ref="refs/tags/$RELEASE_TAG"
+          built_commit=$(git rev-parse HEAD)
+          refs=$(git ls-remote origin "$ref" "$ref^{}")
+          tag_commit=$(awk -v ref="$ref" '$2 == ref { print $1 }' <<< "$refs")
+          peeled_commit=$(awk -v ref="$ref^{}" '$2 == ref { print $1 }' <<< "$refs")
+          if [[ -z "$tag_commit" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch ]]; then
+              echo "The release tag was removed before publication."
+              exit 1
+            fi
+            git push origin "$built_commit:$ref"
+          elif [[ "${peeled_commit:-$tag_commit}" != "$built_commit" ]]; then
+            echo "This tag already points to a different commit."
+            exit 1
+          fi
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
