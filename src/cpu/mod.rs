@@ -1,7 +1,10 @@
 pub mod n_compiler;
+mod n2;
 pub mod project;
 pub mod instruction;
 pub mod assembler;
+pub mod peripheral;
+pub mod network;
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -49,6 +52,21 @@ pub const VEC_MOUSE_CLICK: i32 = 12;
 pub const VEC_TIMER: i32 = 13;
 pub const VEC_RESET: i32 = 14;
 
+const INSTRUCTIONS: &[&str] = &[
+    "NOP", "MOV", "ADD", "SUB", "MUL", "DIV", "MOD", "INC", "DEC", "CMP",
+    "AND", "OR", "XOR", "NOT", "SHL", "SHR", "JMP", "JZ", "JNZ", "JS",
+    "JNS", "JL", "JLE", "JG", "JGE", "CALL", "RET", "PUSH", "POP", "PUSHA",
+    "POPA", "IVEC", "IRET", "CLI", "STI", "INT", "OUT", "OUTH", "OUTC",
+    "CLS", "SLEEP", "TIME", "RAND", "INPAD", "TIMER", "SETTIMER", "VBLANK",
+    "SSIZE", "SREAD", "SWRITE", "SBLKR", "SBLKW", "SCOUNT", "SSEL", "SDRV",
+    "SEXEC", "SBOOT", "FBMODE", "DMODE", "FBSET", "PIX", "FBGET", "FBCLR",
+    "FCLR", "FBRECT", "RECT", "FBLINE", "LINE", "FBLIT", "FBSWAP", "FBWIDTH",
+    "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
+    "PINFO", "PWRAP", "PCALL", "PCALLS", "PSTATUS", "PRESULT", "PSCAN",
+    "NOPEN", "NSEND", "NRECV", "NCLOSE", "NHTTP", "NSTATUS", "NLEN", "NRESULT",
+    "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
+];
+
 pub struct VirtualCpu {
     pub reg_a: i32,
     pub reg_b: i32,
@@ -74,9 +92,13 @@ pub struct VirtualCpu {
     pub last_timer_cycle: u64,
     pub sleep_ticks_remaining: i32,
 
+    key_buffer: VecDeque<i32>,
+    pub peripheral_bus: peripheral::PeripheralBus,
+    pub network_port: network::NetworkPort,
     pub pad_states: [i32; 4],
     pub terminal_output: Vec<String>,
     pub line_buffer: String,
+    utf8_bytes: Vec<u8>,
 
     pub ram: Ram,
     pub storage: StorageSubsystem,
@@ -126,9 +148,13 @@ impl VirtualCpu {
             last_timer_cycle: 0,
             sleep_ticks_remaining: 0,
 
+            key_buffer: VecDeque::new(),
+            peripheral_bus: peripheral::PeripheralBus::default(),
+            network_port: network::NetworkPort::default(),
             pad_states: [0; 4],
             terminal_output: Vec::new(),
             line_buffer: String::new(),
+            utf8_bytes: Vec::new(),
 
             ram: Ram::new(ram_words),
             storage: StorageSubsystem::new(),
@@ -140,24 +166,7 @@ impl VirtualCpu {
             compiled_program: Vec::new(),
             labels: HashMap::new(),
             data_labels: HashMap::new(),
-            supported_instructions: {
-                let mut set = std::collections::HashSet::new();
-                for instr in [
-                    "NOP", "MOV", "ADD", "SUB", "MUL", "DIV", "MOD", "INC", "DEC", "CMP",
-                    "AND", "OR", "XOR", "NOT", "SHL", "SHR", "JMP", "JZ", "JNZ", "JS",
-                    "JNS", "JL", "JLE", "JG", "JGE", "CALL", "RET", "PUSH", "POP", "PUSHA",
-                    "POPA", "IVEC", "IRET", "CLI", "STI", "INT", "OUT", "OUTH", "OUTC",
-                    "CLS", "SLEEP", "TIME", "RAND", "INPAD", "TIMER", "SETTIMER", "VBLANK",
-                    "SSIZE", "SREAD", "SWRITE", "SBLKR", "SBLKW", "SCOUNT", "SSEL", "SDRV",
-                    "SEXEC", "SBOOT", "FBMODE", "DMODE", "FBSET", "PIX", "FBGET", "FBCLR",
-                    "FCLR", "FBRECT", "RECT", "FBLINE", "LINE", "FBLIT", "FBSWAP", "FBWIDTH",
-                    "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
-                    "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
-                ] {
-                    set.insert(instr.to_string());
-                }
-                set
-            },
+            supported_instructions: INSTRUCTIONS.iter().map(|&name| name.to_string()).collect(),
             start_time: Instant::now(),
         }
     }
@@ -204,20 +213,7 @@ impl VirtualCpu {
     }
 
     pub fn enable_all_instructions(&mut self) {
-        for instr in [
-            "NOP", "MOV", "ADD", "SUB", "MUL", "DIV", "MOD", "INC", "DEC", "CMP",
-            "AND", "OR", "XOR", "NOT", "SHL", "SHR", "JMP", "JZ", "JNZ", "JS",
-            "JNS", "JL", "JLE", "JG", "JGE", "CALL", "RET", "PUSH", "POP", "PUSHA",
-            "POPA", "IVEC", "IRET", "CLI", "STI", "INT", "OUT", "OUTH", "OUTC",
-            "CLS", "SLEEP", "TIME", "RAND", "INPAD", "TIMER", "SETTIMER", "VBLANK",
-            "SSIZE", "SREAD", "SWRITE", "SBLKR", "SBLKW", "SCOUNT", "SSEL", "SDRV",
-            "SEXEC", "SBOOT", "FBMODE", "DMODE", "FBSET", "PIX", "FBGET", "FBCLR",
-            "FCLR", "FBRECT", "RECT", "FBLINE", "LINE", "FBLIT", "FBSWAP", "FBWIDTH",
-            "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
-            "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
-        ] {
-            self.supported_instructions.insert(instr.to_string());
-        }
+        self.supported_instructions.extend(INSTRUCTIONS.iter().map(|&name| name.to_string()));
     }
 
     pub fn is_instruction_supported(&self, name: &str) -> bool {
@@ -354,9 +350,17 @@ impl VirtualCpu {
         self.timer_hz = 0;
         self.timer_interval_cycles = 0;
         self.pad_states = [0; 4];
+        self.key_buffer.clear();
+        self.peripheral_bus.reset();
+        self.network_port.reset();
         self.terminal_output.clear();
         self.line_buffer.clear();
+        self.utf8_bytes.clear();
+        self.framebuffer.set_mode(0);
         self.framebuffer.clear(0xFF051009);
+        let drive = (0..crate::hardware::storage::MAX_DRIVES)
+            .find(|&drive| self.storage.capacity(drive) > 0).unwrap_or(0);
+        let _ = self.storage.select_drive(drive);
         self.audio.clear();
         self.start_time = Instant::now();
 
@@ -382,6 +386,8 @@ impl VirtualCpu {
     pub fn power_off(&mut self) {
         self.flush_line_buffer();
         self.state = State::Off;
+        self.peripheral_bus.reset();
+        self.network_port.reset();
         self.audio.clear();
         self.terminal_output.push("[POWER OFF]".to_string());
     }
@@ -449,6 +455,9 @@ impl VirtualCpu {
     }
 
     pub fn queue_keyboard_interrupt(&mut self, key_char: i32) {
+        if self.key_buffer.len() < 64 {
+            self.key_buffer.push_back(key_char);
+        }
         if self.interrupt_queue.len() < 64 {
             self.interrupt_queue.push_back(InterruptEvent {
                 vector: VEC_KEYBOARD,
@@ -460,6 +469,13 @@ impl VirtualCpu {
     }
 
     pub fn queue_mouse_move_interrupt(&mut self, x: i32, y: i32) {
+        if let Some(last) = self.interrupt_queue.back_mut() {
+            if last.vector == VEC_MOUSE_MOVE {
+                last.reg_a = x;
+                last.reg_b = y;
+                return;
+            }
+        }
         if self.interrupt_queue.len() < 64 {
             self.interrupt_queue.push_back(InterruptEvent {
                 vector: VEC_MOUSE_MOVE,
@@ -745,6 +761,8 @@ impl VirtualCpu {
     }
 
     pub fn execute_next_instruction(&mut self) {
+        self.peripheral_bus.service();
+        self.network_port.service();
         self.check_and_dispatch_interrupt();
 
         if self.pc >= self.program.len() {
@@ -782,6 +800,138 @@ impl VirtualCpu {
 
         if self.terminal_output.len() > 100 {
             self.terminal_output.remove(0);
+        }
+    }
+
+    fn submit_peripheral(&mut self, opcode: Opcode, args: &str) -> Result<(), String> {
+        use peripheral::Operation;
+
+        let parts = instruction_args(args, if matches!(opcode, Opcode::PCALL | Opcode::PCALLS) { 5 } else { 2 })?;
+        let address = self.resolve_value(&parts[1])?;
+        if self.peripheral_bus.status() != 0 {
+            return self.set_destination(&parts[0], 0);
+        }
+        let operation = match opcode {
+            Opcode::PINFO => Operation::Info,
+            Opcode::PWRAP => Operation::Wrap,
+            Opcode::PSCAN => Operation::Scan,
+            Opcode::PCALL | Opcode::PCALLS => {
+                let method = self.resolve_value(&parts[2])?;
+                let arg0 = self.resolve_value(&parts[3])?;
+                let arg1 = self.resolve_value(&parts[4])?;
+                if opcode == Opcode::PCALLS {
+                    Operation::CallString(method, self.read_guest_string(arg0, 64)?, arg1)
+                } else {
+                    Operation::Call(method, arg0, arg1)
+                }
+            }
+            _ => unreachable!(),
+        };
+        self.peripheral_bus.submit(address, operation);
+        self.set_destination(&parts[0], 1)
+    }
+
+    fn read_guest_string(&self, address: i32, limit: usize) -> Result<String, String> {
+        let address = usize::try_from(address).map_err(|_| "Guest string out of bounds")?;
+        let mut text = Vec::new();
+        for offset in 0..=limit {
+            let value = self.ram.read(address + offset)?;
+            if value == 0 {
+                return Ok(String::from_utf16_lossy(&text));
+            }
+            if offset == limit {
+                break;
+            }
+            text.push(u16::try_from(value).map_err(|_| "Invalid character in guest string")?);
+        }
+        Err(format!("Guest string exceeds {limit} characters"))
+    }
+
+    fn submit_network(&mut self, opcode: Opcode, args: &str) -> Result<(), String> {
+        use network::Request;
+
+        let count = match opcode {
+            Opcode::NOPEN | Opcode::NSEND => 4,
+            Opcode::NRECV => 3,
+            Opcode::NCLOSE => 2,
+            Opcode::NHTTP => 5,
+            _ => unreachable!(),
+        };
+        let parts = instruction_args(args, count)?;
+        if self.network_port.status() != 0 {
+            return self.set_destination(&parts[0], 0);
+        }
+
+        let value = |i: usize| self.resolve_value(&parts[i]);
+        let arg0 = value(1)?;
+        let request = match opcode {
+            Opcode::NOPEN => Request::Open(arg0, self.read_guest_string(value(2)?, network::MAX_TEXT)?, value(3)?),
+            Opcode::NSEND => Request::Send(arg0, self.network_payload(value(2)?, value(3)?)?),
+            Opcode::NRECV => Request::Receive(arg0, value(2)?),
+            Opcode::NCLOSE => Request::Close(arg0),
+            Opcode::NHTTP => Request::Http(arg0, self.read_guest_string(value(2)?, network::MAX_TEXT)?,
+                self.network_payload(value(3)?, value(4)?)?),
+            _ => unreachable!(),
+        };
+        self.network_port.submit(request);
+        self.set_destination(&parts[0], 1)
+    }
+
+    fn guest_range(&self, address: i32, length: i32) -> Result<std::ops::Range<usize>, String> {
+        if address < 0 || length < 0 || i64::from(address) + i64::from(length) > self.ram.len() as i64 {
+            return Err("Network buffer out of bounds".to_string());
+        }
+        let start = address as usize;
+        Ok(start..start + length as usize)
+    }
+
+    fn network_payload(&self, address: i32, length: i32) -> Result<Vec<u8>, String> {
+        let range = self.guest_range(address, length)?;
+        if range.len() > network::MAX_TRANSFER {
+            return Err("Network payload exceeds transfer limit".to_string());
+        }
+        Ok(self.ram.as_slice()[range].iter().map(|&word| word as u8).collect())
+    }
+
+    fn read_network_result(&mut self, args: &str) -> Result<(), String> {
+        let parts = instruction_args(args, 3)?;
+        let range = self.guest_range(self.resolve_value(&parts[1])?, self.resolve_value(&parts[2])?)?;
+        let value = self.network_port.take_result().map_or(0, |result| {
+            for (word, byte) in self.ram.as_mut_slice()[range].iter_mut().zip(result.data) {
+                *word = i32::from(byte);
+            }
+            result.value
+        });
+        self.set_destination(&parts[0], value)
+    }
+
+    fn transfer_storage(&mut self, opcode: Opcode, args: &str) -> Result<(), String> {
+        let parts = Assembler::split_args(args, usize::MAX);
+        let write = opcode == Opcode::SBLKW;
+        let value = |index: usize| self.resolve_value(&parts[index]);
+        let selected = self.storage.selected_drive();
+        let (drive, disk, memory, count) = match (write, parts.len()) {
+            (false, 3) => (selected, value(1)?, value(0)?, value(2)?),
+            (false, 4) => (value(1)? as usize, value(2)?, value(0)?, value(3)?),
+            (true, 3) => (selected, value(0)?, value(1)?, value(2)?),
+            (true, 4) => (value(0)? as usize, value(1)?, value(2)?, value(3)?),
+            _ => return Err("Storage transfer requires three or four operands".to_string()),
+        };
+        let (disk, memory) = (i64::from(disk), i64::from(memory));
+        let offset = 0.max(-disk).max(-memory);
+        let capacity = self.storage.capacity(drive) as i64;
+        let end = i64::from(count).min(capacity - disk).min(self.ram.len() as i64 - memory);
+        self.flag_z = capacity == 0 || offset >= end;
+        if self.flag_z {
+            return Ok(());
+        }
+        let disk = (disk + offset) as usize;
+        let memory = (memory + offset) as usize;
+        let count = (end - offset) as usize;
+        if write {
+            self.storage.block_write(drive, disk, &self.ram, memory, count)
+        } else {
+            self.storage.block_read(drive, disk, &mut self.ram, memory, count)
         }
     }
 
@@ -1118,18 +1268,20 @@ impl VirtualCpu {
                 Ok(())
             }
             Opcode::OUTC => {
-                let val = self.resolve_value(&ci.raw_args)?;
-                let ch = std::char::from_u32(val as u32).unwrap_or('?');
-                if ch == '\n' {
-                    self.flush_line_buffer();
+                let arg = ci.raw_args.trim();
+                if let Some(text) = output_string(arg) {
+                    for byte in text.bytes() {
+                        self.emit_character(i32::from(byte));
+                    }
                 } else {
-                    self.line_buffer.push(ch);
+                    self.emit_character(self.resolve_value(arg)?);
                 }
                 Ok(())
             }
             Opcode::CLS => {
                 self.terminal_output.clear();
                 self.line_buffer.clear();
+                self.utf8_bytes.clear();
                 Ok(())
             }
             Opcode::SLEEP => {
@@ -1156,14 +1308,28 @@ impl VirtualCpu {
             }
             Opcode::INPAD => {
                 let parts = Assembler::split_args(&ci.raw_args, 2);
-                let port = if parts.len() >= 2 {
-                    self.resolve_value(&parts[1])?.clamp(0, 3) as usize
-                } else {
-                    0
+                let dest = parts.first().ok_or("INPAD requires a destination")?;
+                let port = parts.get(1).map_or(Ok(0), |port| self.resolve_value(port))?;
+                let value = match port {
+                    -1 => self.key_buffer.pop_front().unwrap_or(-1),
+                    -2 => self.key_buffer.front().copied().unwrap_or(-1),
+                    0..=3 => self.pad_states[port as usize],
+                    _ => 0,
                 };
-                let mask = self.pad_states[port];
-                self.set_destination(&parts[0], mask)
+                self.set_destination(dest, value)
             }
+            Opcode::PINFO | Opcode::PWRAP | Opcode::PCALL | Opcode::PCALLS | Opcode::PSCAN =>
+                self.submit_peripheral(ci.opcode, &ci.raw_args),
+            Opcode::PSTATUS => self.set_destination(&ci.raw_args, self.peripheral_bus.status()),
+            Opcode::PRESULT => {
+                let value = self.peripheral_bus.take_result();
+                self.set_destination(&ci.raw_args, value)
+            }
+            Opcode::NOPEN | Opcode::NSEND | Opcode::NRECV | Opcode::NCLOSE | Opcode::NHTTP =>
+                self.submit_network(ci.opcode, &ci.raw_args),
+            Opcode::NSTATUS => self.set_destination(&ci.raw_args, self.network_port.status()),
+            Opcode::NLEN => self.set_destination(&ci.raw_args, self.network_port.result_length()),
+            Opcode::NRESULT => self.read_network_result(&ci.raw_args),
             Opcode::TIMER => {
                 let hz = self.resolve_value(&ci.raw_args)?;
                 self.set_timer_hz(hz);
@@ -1189,8 +1355,11 @@ impl VirtualCpu {
                 } else {
                     self.storage.selected_drive()
                 };
-                let cap = self.storage.capacity(drive) as i32;
-                self.set_destination(&parts[0], cap)
+                let capacity = self.storage.capacity(drive);
+                self.set_destination(&parts[0], capacity as i32)?;
+                self.flag_z = capacity == 0;
+                self.flag_s = false;
+                Ok(())
             }
             Opcode::SREAD => {
                 let parts = Assembler::split_args(&ci.raw_args, 3);
@@ -1201,8 +1370,10 @@ impl VirtualCpu {
                 } else {
                     return Err("SREAD requires dest, [drive,] addr".to_string());
                 };
-                let val = self.storage.read_byte(drive, addr)?;
-                self.set_destination(dest, val)
+                self.flag_s = addr >= self.storage.capacity(drive);
+                let value = if self.flag_s { 0 } else { self.storage.read_byte(drive, addr)? };
+                self.flag_z = value == 0;
+                self.set_destination(dest, value)
             }
             Opcode::SWRITE => {
                 let parts = Assembler::split_args(&ci.raw_args, 3);
@@ -1213,50 +1384,54 @@ impl VirtualCpu {
                 } else {
                     return Err("SWRITE requires [drive,] addr, val".to_string());
                 };
-                self.storage.write_byte(drive, addr, val)
+                self.flag_z = addr >= self.storage.capacity(drive);
+                self.flag_s = self.flag_z;
+                if !self.flag_s {
+                    self.storage.write_byte(drive, addr, val)?;
+                }
+                Ok(())
             }
-            Opcode::SBLKR => {
-                let parts = Assembler::split_args(&ci.raw_args, 4);
-                let (r_dest, drive, s_addr, count) = if parts.len() >= 4 {
-                    (self.resolve_value(&parts[0])? as usize, self.resolve_value(&parts[1])? as usize, self.resolve_value(&parts[2])? as usize, self.resolve_value(&parts[3])? as usize)
-                } else if parts.len() == 3 {
-                    (self.resolve_value(&parts[0])? as usize, self.storage.selected_drive(), self.resolve_value(&parts[1])? as usize, self.resolve_value(&parts[2])? as usize)
-                } else {
-                    return Err("SBLKR requires ram_dest, [drive,] storage_addr, count".to_string());
-                };
-                self.storage.block_read(drive, s_addr, &mut self.ram, r_dest, count)
-            }
-            Opcode::SBLKW => {
-                let parts = Assembler::split_args(&ci.raw_args, 4);
-                let (drive, s_addr, r_src, count) = if parts.len() >= 4 {
-                    (self.resolve_value(&parts[0])? as usize, self.resolve_value(&parts[1])? as usize, self.resolve_value(&parts[2])? as usize, self.resolve_value(&parts[3])? as usize)
-                } else if parts.len() == 3 {
-                    (self.storage.selected_drive(), self.resolve_value(&parts[0])? as usize, self.resolve_value(&parts[1])? as usize, self.resolve_value(&parts[2])? as usize)
-                } else {
-                    return Err("SBLKW requires [drive,] storage_addr, ram_src, count".to_string());
-                };
-                self.storage.block_write(drive, s_addr, &self.ram, r_src, count)
-            }
+            Opcode::SBLKR | Opcode::SBLKW => self.transfer_storage(ci.opcode, &ci.raw_args),
             Opcode::SCOUNT => {
                 let count = self.storage.drive_count() as i32;
-                self.set_destination(&ci.raw_args, count)
+                self.set_destination(&ci.raw_args, count)?;
+                self.flag_z = count == 0;
+                self.flag_s = false;
+                Ok(())
             }
             Opcode::SSEL => {
                 let drive = self.resolve_value(&ci.raw_args)? as usize;
-                self.storage.select_drive(drive)
+                self.flag_s = self.storage.select_drive(drive).is_err();
+                self.flag_z = self.storage.capacity(drive) == 0;
+                Ok(())
             }
             Opcode::SDRV => {
                 let drive = self.storage.selected_drive() as i32;
-                self.set_destination(&ci.raw_args, drive)
+                self.set_destination(&ci.raw_args, drive)?;
+                self.flag_z = drive == 0;
+                self.flag_s = false;
+                Ok(())
             }
             Opcode::SEXEC => {
                 let drive = self.resolve_value(&ci.raw_args)? as usize;
-                if let Some(prog) = self.storage.get_drive_program(drive).cloned() {
-                    self.load_program(&prog);
-                    Ok(())
-                } else {
-                    Err(format!("No executable program found on drive {}", drive))
+                if drive >= crate::hardware::storage::MAX_DRIVES {
+                    return Err(format!("Drive index {drive} out of bounds"));
                 }
+                let program = self.storage.get_drive_program(drive).cloned()
+                    .or_else(|| self.storage.read_program_text(drive))
+                    .ok_or_else(|| format!("No executable program found on drive {drive}"))?;
+                self.network_port.reset();
+                self.peripheral_bus.reset();
+                self.program = program;
+                self.preprocess_labels();
+                self.compile_bytecode();
+                self.call_stack.clear();
+                self.pc = 0;
+                self.storage.select_drive(drive)?;
+                self.flag_z = false;
+                self.flag_s = false;
+                self.flush_line_buffer();
+                Ok(())
             }
             Opcode::FBMODE => {
                 let mode = self.resolve_value(&ci.raw_args)?;
@@ -1313,12 +1488,12 @@ impl VirtualCpu {
             }
             Opcode::FBLIT => {
                 let parts = Assembler::split_args(&ci.raw_args, 5);
-                if parts.len() != 5 { return Err("FBLIT requires x, y, w, h, ram_src".to_string()); }
+                if parts.len() != 5 { return Err("FBLIT requires x, y, ram_src, w, h".to_string()); }
                 let x = self.resolve_value(&parts[0])?;
                 let y = self.resolve_value(&parts[1])?;
-                let w = self.resolve_value(&parts[2])?;
-                let h = self.resolve_value(&parts[3])?;
-                let ram_src = self.resolve_value(&parts[4])? as usize;
+                let ram_src = self.resolve_value(&parts[2])? as usize;
+                let w = self.resolve_value(&parts[3])?;
+                let h = self.resolve_value(&parts[4])?;
                 self.framebuffer.blit(x, y, w, h, &self.ram, ram_src);
                 Ok(())
             }
@@ -1337,9 +1512,13 @@ impl VirtualCpu {
             Opcode::ABUFW => {
                 let parts = Assembler::split_args(&ci.raw_args, 2);
                 if parts.len() != 2 { return Err("ABUFW requires ram_src, count".to_string()); }
-                let ram_src = self.resolve_value(&parts[0])? as usize;
-                let count = self.resolve_value(&parts[1])? as usize;
-                self.audio.write_buffer(&self.ram, ram_src, count);
+                let ram_src = i64::from(self.resolve_value(&parts[0])?);
+                let count = i64::from(self.resolve_value(&parts[1])?);
+                let start = ram_src.max(0);
+                let end = (ram_src + count).min(self.ram.len() as i64);
+                if start < end {
+                    self.audio.write_buffer(&self.ram, start as usize, (end - start) as usize);
+                }
                 Ok(())
             }
             Opcode::ACLR => {
@@ -1393,11 +1572,9 @@ impl VirtualCpu {
             }
         }
 
-        if (val_part.starts_with('\"') && val_part.ends_with('\"'))
-            || (val_part.starts_with('\'') && val_part.ends_with('\''))
-        {
-            let text = &val_part[1..val_part.len() - 1];
-            self.line_buffer.push_str(text);
+        self.flush_utf8();
+        if let Some(text) = output_string(val_part) {
+            self.line_buffer.push_str(&text);
         } else {
             let val = self.resolve_value(val_part)?;
             self.line_buffer.push_str(&val.to_string());
@@ -1409,7 +1586,45 @@ impl VirtualCpu {
         Ok(())
     }
 
+    fn emit_character(&mut self, value: i32) {
+        match value {
+            10 => {
+                self.flush_utf8();
+                if self.line_buffer.is_empty() {
+                    self.terminal_output.push(String::new());
+                } else {
+                    self.flush_line_buffer();
+                }
+            }
+            13 | i32::MIN..=-1 => {}
+            128..=255 => {
+                self.utf8_bytes.push(value as u8);
+                if let Ok(text) = std::str::from_utf8(&self.utf8_bytes) {
+                    self.line_buffer.push_str(text);
+                    self.utf8_bytes.clear();
+                } else if self.utf8_bytes.len() == 4 {
+                    self.flush_utf8();
+                }
+            }
+            _ => {
+                self.flush_utf8();
+                self.line_buffer.push(char::from_u32(value as u32).unwrap_or('?'));
+            }
+        }
+        if self.line_buffer.encode_utf16().count() >= 42 {
+            self.flush_line_buffer();
+        }
+    }
+
+    fn flush_utf8(&mut self) {
+        if !self.utf8_bytes.is_empty() {
+            self.line_buffer.push('?');
+            self.utf8_bytes.clear();
+        }
+    }
+
     pub fn flush_line_buffer(&mut self) {
+        self.flush_utf8();
         if !self.line_buffer.is_empty() {
             let line = std::mem::take(&mut self.line_buffer);
             self.terminal_output.push(line);
@@ -1477,4 +1692,24 @@ impl VirtualCpu {
         }
         None
     }
+}
+
+
+fn instruction_args(args: &str, expected: usize) -> Result<Vec<String>, String> {
+    let parts = Assembler::split_args(args, usize::MAX);
+    if parts.len() != expected || parts.iter().any(String::is_empty) {
+        return Err(format!("Expected {expected} instruction operands"));
+    }
+    Ok(parts)
+}
+
+
+fn output_string(arg: &str) -> Option<String> {
+    let quote = arg.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let text = arg.strip_prefix(quote)?.strip_suffix(quote)?;
+    Some(text.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+        .replace("\\\"", "\"").replace("\\'", "'"))
 }

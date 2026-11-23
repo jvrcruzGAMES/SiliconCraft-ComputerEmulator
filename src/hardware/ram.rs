@@ -4,19 +4,12 @@ pub struct Ram {
 }
 
 impl Ram {
-    /// Capacity of a single RAM stick in bytes: 1024 KB = 1,048,576 bytes
-    pub const RAM_STICK_BYTES: usize = 1024 * 1024;
-    /// Capacity of a single RAM stick in 32-bit words: 262,144 words
+    pub const RAM_STICK_BYTES: usize = 2 * 1024 * 1024;
     pub const RAM_STICK_WORDS: usize = Self::RAM_STICK_BYTES / 4;
-    /// Standard full complement: 4 sticks of RAM
-    pub const NUM_RAM_STICKS: usize = 4;
-    /// Full 4-stick capacity in bytes: 4096 KB (4 MB = 4,194,304 bytes)
-    pub const FOUR_STICKS_BYTES: usize = Self::NUM_RAM_STICKS * Self::RAM_STICK_BYTES;
-    /// Full 4-stick capacity in 32-bit words: 1,048,576 words
-    pub const FOUR_STICKS_WORDS: usize = Self::NUM_RAM_STICKS * Self::RAM_STICK_WORDS;
-
-    /// Default RAM capacity in emulator: 4 sticks of RAM (4096 KB / 1,048,576 words)
-    pub const DEFAULT_SIZE: usize = Self::FOUR_STICKS_WORDS;
+    pub const NUM_RAM_STICKS: usize = 8;
+    pub const FOUR_STICKS_BYTES: usize = 4 * Self::RAM_STICK_BYTES;
+    pub const FOUR_STICKS_WORDS: usize = 4 * Self::RAM_STICK_WORDS;
+    pub const DEFAULT_SIZE: usize = Self::NUM_RAM_STICKS * Self::RAM_STICK_WORDS;
 
     pub fn new(capacity_words: usize) -> Self {
         Self {

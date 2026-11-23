@@ -9,3 +9,6 @@ description = "High-performance emulator for the SiliconCraft Virtual CPU archit
 pixels = "0.17.2"
 winit = "0.30.13"
 font8x8 = "0.3.1"
+sdl3 = { version = "0.22.1", features = ["build-from-source-static", "build-from-source-unix-console"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+tempfile = "3"

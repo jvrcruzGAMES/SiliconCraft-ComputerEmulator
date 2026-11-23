@@ -6,7 +6,7 @@ use siliconcraft_emulator::{demos, VirtualCpu, State, ProjectResolver, NCompiler
 
 fn print_help() {
     println!("SiliconCraft Virtual CPU Emulator");
-    println!("Usage: siliconcraft-emulator [OPTIONS] <file.o | file.asm | file.n | project_dir>");
+    println!("Usage: siliconcraft-emulator [OPTIONS] <file.o | file.asm | file.n | file.n2 | project_dir>");
     println!();
     println!("Options:");
     println!("  --demo <name>             Run a built-in demo ({})", demos::list_demos().join(", "));
@@ -16,9 +16,11 @@ fn print_help() {
     println!("  --cycles <N>              Limit execution to N cycles (default: 10,000,000)");
     println!("  --dump-regs               Print CPU registers and flags after execution");
     println!("  --dump-ram <start> <num>  Dump RAM contents from <start> for <num> words");
-    println!("  --dump-fb                 Display ANSI ASCII view of the 480x270 framebuffer");
+    println!("  --dump-fb                 Display ANSI ASCII view of the 960x540 framebuffer");
     println!("  --save-fb <output.ppm>    Save framebuffer image to a PPM file");
     println!("  --save-audio <output.wav> Save generated audio samples to an 8kHz 8-bit WAV file");
+    println!("  --drive <slot:path>       Attach a persistent image to drive 0, 1, or 2");
+    println!("  --allow-network <host:port> Permit guest networking to an exact endpoint (repeatable)");
     println!("  --help, -h                Show this help message");
 }
 
@@ -29,6 +31,8 @@ fn main() {
         return;
     }
 
+    let mut drive_images = Vec::new();
+    let mut network_endpoints = Vec::new();
     let mut file_path: Option<String> = None;
     let mut demo_name: Option<String> = None;
     let mut step_mode = false;
@@ -68,6 +72,34 @@ fn main() {
                     eprintln!("Error: --demo requires a demo name");
                     return;
                 }
+            }
+            "--drive" => {
+                let image = args.get(i + 1).and_then(|value| value.split_once(':'));
+                let Some((slot, path)) = image.and_then(|(slot, path)| {
+                    let slot = slot.parse::<usize>().ok()?;
+                    (slot < 3 && !path.is_empty()).then_some((slot, path))
+                }) else {
+                    eprintln!("Error: --drive requires slot:path with slot 0, 1 or 2");
+                    std::process::exit(2);
+                };
+                if drive_images.iter().any(|&(configured, _)| configured == slot) {
+                    eprintln!("Error: drive {slot} was specified more than once");
+                    std::process::exit(2);
+                }
+                drive_images.push((slot, path));
+                i += 1;
+            }
+            "--allow-network" => {
+                let endpoint = args.get(i + 1).and_then(|value| value.rsplit_once(':'));
+                let Some((host, port)) = endpoint.and_then(|(host, port)| {
+                    let port = port.parse::<u16>().ok()?;
+                    (!host.is_empty() && port > 0).then_some((host, port))
+                }) else {
+                    eprintln!("Error: --allow-network requires host:port");
+                    std::process::exit(2);
+                };
+                network_endpoints.push((host, port));
+                i += 1;
             }
             "--headless" => {
                 headless_mode = true;
@@ -149,8 +181,13 @@ fn main() {
             let mut resolved = None;
             if let Ok(files) = ProjectResolver::load_project_from_dir(parent_dir) {
                 if files.contains_key(&filename) {
-                    if let Ok(lines) = ProjectResolver::compile_project(&files, Some(&filename)) {
-                        resolved = Some((path.clone(), lines));
+                    match ProjectResolver::compile_project(&files, Some(&filename)) {
+                        Ok(lines) => resolved = Some((path.clone(), lines)),
+                        Err(error) if ProjectResolver::is_n2_file(&filename) => {
+                            eprintln!("Compilation failed: {error}");
+                            std::process::exit(1);
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -160,7 +197,16 @@ fn main() {
                 match fs::read_to_string(&path) {
                     Ok(content) => {
                         let raw_lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-                        if path.ends_with(".n") {
+                        if ProjectResolver::is_n2_file(&filename) {
+                            let project = std::collections::HashMap::from([(filename.clone(), raw_lines)]);
+                            match ProjectResolver::compile_project(&project, Some(&filename)) {
+                                Ok(lines) => (path, lines),
+                                Err(error) => {
+                                    eprintln!("Compilation failed: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        } else if path.ends_with(".n") {
                             match NCompiler::compile(&raw_lines) {
                                 Ok(compiled) => (path, compiled),
                                 Err(err) => {
@@ -185,7 +231,16 @@ fn main() {
         return;
     };
 
-    let mut cpu = VirtualCpu::default(); // 4 sticks of RAM: 4096 KB (1,048,576 words)
+    let mut cpu = VirtualCpu::default();
+    for (slot, path) in drive_images {
+        if let Err(error) = cpu.storage.attach_image(slot, Path::new(path)) {
+            eprintln!("Could not attach drive {slot} from {path}: {error}");
+            std::process::exit(1);
+        }
+    }
+    for (host, port) in network_endpoints {
+        cpu.network_port.allow(host, port);
+    }
     cpu.burn_to_rom(&source_lines); // Code burned to non-volatile ROM
 
     if step_mode {
@@ -206,6 +261,7 @@ fn main() {
     } else {
         if let Err(e) = run_emulator_window(cpu) {
             eprintln!("Vulkan window error: {}", e);
+            std::process::exit(1);
         }
         return;
     }
@@ -239,7 +295,7 @@ fn main() {
     }
 
     if dump_fb {
-        println!("\n=== Framebuffer ASCII View (480x270) ===");
+        println!("\n=== Framebuffer ASCII View (960x540) ===");
         print!("{}", cpu.framebuffer.render_ascii());
     }
 

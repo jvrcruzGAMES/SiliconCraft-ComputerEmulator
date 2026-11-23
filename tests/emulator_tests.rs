@@ -205,6 +205,12 @@ fn test_graphics_and_framebuffer() {
         "FBCLR 0xFF000000",
         "FBSET 10, 10, 0xFFFF0000",
         "FBRECT 20, 20, 10, 5, 0xFF00FF00",
+        "FBWIDTH A",
+        "FBHEIGHT B",
+        "FBSET 959, 539, 0xFFABCDEF",
+        "MOV [100], 0x00335577",
+        "FBLIT 800, 500, 100, 1, 1",
+        "FBLINE -2147483648, 400, 2147483647, 400, 0x00001133",
         "HLT",
     ];
 
@@ -216,6 +222,12 @@ fn test_graphics_and_framebuffer() {
     assert_eq!(cpu.framebuffer.get_pixel(10, 10), 0xFFFF0000);
     assert_eq!(cpu.framebuffer.get_pixel(20, 20), 0xFF00FF00);
     assert_eq!(cpu.framebuffer.get_pixel(25, 22), 0xFF00FF00);
+    assert_eq!(cpu.read_reg(Register::A), 960);
+    assert_eq!(cpu.read_reg(Register::B), 540);
+    assert_eq!(cpu.framebuffer.get_pixel(959, 539), 0xFFABCDEF);
+    assert_eq!(cpu.framebuffer.get_pixel(960, 539), 0);
+    assert_eq!(cpu.framebuffer.get_pixel(800, 500), 0xFF335577);
+    assert_eq!(cpu.framebuffer.get_pixel(959, 400), 0xFF001133);
 }
 
 #[test]
@@ -234,10 +246,10 @@ fn test_audio_playback() {
 }
 
 #[test]
-fn test_four_sticks_ram_and_nvme_and_rom() {
+fn test_maximum_ram_and_storage_and_rom() {
     let program = vec![
-        "MOV [1000000], 12345",  // Address requires > 768K words, impossible without 4 sticks (1M words)
-        "MOV A, [1000000]",
+        "MOV [4194303], 12345",  // Address requires > 768K words, impossible without 4 sticks (1M words)
+        "MOV A, [4194303]",
         "SSEL 1",               // Select Extension Slot 1 (NVMe drive)
         "SWRITE 0, 42",         // Write 42 to NVMe drive
         "SREAD B, 0",           // Read back into B
@@ -247,9 +259,9 @@ fn test_four_sticks_ram_and_nvme_and_rom() {
     let mut cpu = VirtualCpu::default();
 
     // 1. Verify 4 sticks of RAM: 4096 KB / 4 MB (1,048,576 words)
-    assert_eq!(cpu.ram_stick_count(), 4);
-    assert_eq!(cpu.ram_capacity_kb(), 4096);
-    assert_eq!(cpu.ram.len(), 1_048_576);
+    assert_eq!(cpu.ram_stick_count(), 8);
+    assert_eq!(cpu.ram_capacity_kb(), 16_384);
+    assert_eq!(cpu.ram.len(), 4_194_304);
 
     // 2. Verify all instructions enabled
     assert!(cpu.supported_instructions.len() >= 71);
@@ -261,7 +273,10 @@ fn test_four_sticks_ram_and_nvme_and_rom() {
     // 3. Verify NVMe in Extension Slot 1 (Drive 1)
     assert!(cpu.has_nvme());
     assert!(cpu.extension_slot_1_is_nvme());
-    assert_eq!(cpu.storage.capacity(1), 1024 * 1024 * 1024); // 1024 MB
+    assert_eq!(cpu.storage.capacity(1), 2 * 1024 * 1024 * 1024);
+    assert_eq!(cpu.storage.capacity(2), cpu.storage.capacity(0));
+    assert_eq!(cpu.storage.capacity(3), 0);
+    assert_eq!(cpu.storage.drive_count(), 3);
 
     // 4. Burn code to ROM and execute
     cpu.burn_to_rom(&program);
@@ -273,7 +288,7 @@ fn test_four_sticks_ram_and_nvme_and_rom() {
     assert_eq!(cpu.state, State::Halted);
     assert_eq!(cpu.read_reg(Register::A), 12345);
     assert_eq!(cpu.read_reg(Register::B), 42);
-    assert_eq!(cpu.ram.read(1000000), Ok(12345));
+    assert_eq!(cpu.ram.read(4194303), Ok(12345));
 
     // 5. Verify ROM non-volatility on CPU reset
     cpu.reset();
@@ -428,4 +443,123 @@ fn test_reset_interrupt_and_ram_preservation() {
     // Execute cycles: reset interrupt handler must run and copy [100] -> [101]
     cpu.execute_cycles(20);
     assert_eq!(cpu.ram.read(101), Ok(42));
+}
+
+#[test]
+fn storage_instructions_handle_the_last_byte_and_signed_capacity() {
+    let mut cpu = VirtualCpu::default();
+    cpu.burn_to_rom(&[
+        "SSIZE A, 2",
+        "MOV [10], 255",
+        "SBLKW 2, 2147483647, 10, 2",
+        "SREAD B, 2, 2147483647",
+        "SREAD C, 2, 2147483646",
+        "SREAD D, 3, 0",
+        "HLT",
+    ]);
+    cpu.execute_cycles(50);
+    assert_eq!(cpu.state, State::Halted);
+    assert_eq!(cpu.reg_a, i32::MIN);
+    assert_eq!(cpu.reg_b, 255);
+    assert_eq!(cpu.reg_c, 0);
+    assert_eq!(cpu.reg_d, 0);
+    assert!(cpu.flag_z && cpu.flag_s);
+
+    cpu.reset();
+    assert_eq!(cpu.storage.read_byte(2, i32::MAX as usize), Ok(255));
+}
+
+#[test]
+fn storage_can_boot_code_from_bytes_without_overwriting_rom() {
+    let mut cpu = VirtualCpu::default();
+    for (index, value) in b"MOV A, 42\nSDRV B\nHLT".iter().enumerate() {
+        cpu.storage.write_byte(2, index, i32::from(*value)).unwrap();
+    }
+    cpu.burn_to_rom(&["SEXEC 2"]);
+    cpu.execute_cycles(50);
+    assert_eq!(cpu.state, State::Halted);
+    assert_eq!((cpu.reg_a, cpu.reg_b), (42, 2));
+    assert_eq!(cpu.rom(), ["SEXEC 2"]);
+}
+
+#[test]
+fn inpad_reads_connected_ports_and_keyboard_queue() {
+    let mut cpu = VirtualCpu::default();
+    cpu.burn_to_rom(&[
+        "INPAD A, -2", "INPAD B, -1", "INPAD C, -1",
+        "INPAD D, 1", "INPAD [0], 4", "HLT",
+    ]);
+    cpu.set_pad_state(1, 2049);
+    cpu.queue_keyboard_interrupt(90);
+    cpu.execute_cycles(50);
+    assert_eq!((cpu.reg_a, cpu.reg_b, cpu.reg_c, cpu.reg_d), (90, 90, -1, 2049));
+    assert_eq!(cpu.ram.read(0), Ok(0));
+}
+
+#[test]
+fn peripheral_instructions_discover_wrap_and_call_devices() {
+    use siliconcraft_emulator::cpu::peripheral::Peripheral;
+
+    struct Device;
+    impl Peripheral for Device {
+        fn call(&mut self, method: i32, arg0: i32, arg1: i32) -> Option<i32> {
+            (method == 1).then_some(arg0 + arg1)
+        }
+
+        fn call_string(&mut self, method: i32, text: &str, arg: i32) -> Option<i32> {
+            (method == 2 && text == "abc").then_some(arg + 3)
+        }
+    }
+
+    let mut cpu = VirtualCpu::default();
+    cpu.peripheral_bus.attach(7, Device);
+    cpu.burn_to_rom(&[
+        "PSCAN A, -1", "PRESULT [0]",
+        "PINFO A, 7", "PSTATUS [1]", "PRESULT [2]",
+        "PCALL A, 7, 1, 10, 20", "PSTATUS [3]", "PRESULT A",
+        "PWRAP A, 7", "PRESULT B",
+        "PCALL A, 7, 1, 10, 20", "PRESULT [4]",
+        "MOV [20], 97", "MOV [21], 98", "MOV [22], 99",
+        "PCALLS A, 7, 2, 20, 40", "PRESULT [5]",
+        "PSTATUS [6]", "HLT",
+    ]);
+    cpu.execute_cycles(100);
+    assert_eq!(cpu.state, State::Halted);
+    assert_eq!(cpu.reg_b, 1);
+    assert_eq!(&cpu.ram.as_slice()[..7], &[7, 2, 1, -2, 30, 43, 0]);
+}
+
+#[test]
+fn network_is_disabled_without_an_allowed_endpoint() {
+    let mut cpu = VirtualCpu::default();
+    cpu.burn_to_rom(&["NOPEN A, 1, 10, 80", "NSTATUS B", "NLEN C", "NRESULT D, 0, 0", "HLT"]);
+    cpu.execute_cycles(100);
+    assert_eq!(cpu.state, State::Halted);
+    assert_eq!((cpu.reg_a, cpu.reg_b, cpu.reg_c, cpu.reg_d), (1, -1, 0, 0));
+}
+
+#[test]
+fn sparse_image_retains_bytes_when_reopened() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nvme.img");
+    {
+        let mut cpu = VirtualCpu::default();
+        cpu.storage.attach_image(1, &path).unwrap();
+        cpu.burn_to_rom(&["SWRITE 1, 2147483647, 197", "HLT"]);
+        cpu.execute_cycles(10);
+        assert_eq!(cpu.state, State::Halted);
+        assert!(!cpu.flag_s);
+    }
+    let mut cpu = VirtualCpu::default();
+    cpu.storage.attach_image(1, &path).unwrap();
+    assert_eq!(cpu.storage.read_byte(1, 0), Ok(0));
+    assert_eq!(cpu.storage.read_byte(1, i32::MAX as usize), Ok(197));
+}
+
+#[test]
+fn outc_decodes_utf8_and_preserves_blank_lines() {
+    let mut cpu = VirtualCpu::default();
+    cpu.burn_to_rom(&["OUTC 195", "OUTC 161", "OUTC 10", "OUTC 10", "OUTC \"Olá\"", "HLT"]);
+    cpu.execute_cycles(20);
+    assert_eq!(&cpu.terminal_output[..3], &["á", "", "Olá"]);
 }

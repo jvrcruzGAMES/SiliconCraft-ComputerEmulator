@@ -1,21 +1,26 @@
+mod gamepads;
+
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
-use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
+use pixels::{Pixels, PixelsBuilder, ScalingMode, SurfaceTexture};
 use pixels::wgpu::Backends;
 use font8x8::UnicodeFonts;
+use sdl3::audio::{AudioFormat, AudioSpec, AudioStreamOwner};
+use crate::hardware::audio::AUDIO_SAMPLE_RATE;
 
 use crate::cpu::{VirtualCpu, State};
 use crate::hardware::framebuffer::{FB_WIDTH, FB_HEIGHT};
 
 pub const WINDOW_WIDTH: u32 = 960;
 pub const WINDOW_HEIGHT: u32 = 540;
-pub const VIRTUAL_WIDTH: u32 = 480;
-pub const VIRTUAL_HEIGHT: u32 = 270;
+pub const VIRTUAL_WIDTH: u32 = FB_WIDTH as u32;
+pub const VIRTUAL_HEIGHT: u32 = FB_HEIGHT as u32;
 
 const COLOR_BG: (u8, u8, u8) = (5, 16, 9);         // 0xFF051009
 const COLOR_TEXT: (u8, u8, u8) = (51, 255, 102);   // 0xFF33FF66 (Phosphor green)
@@ -32,6 +37,11 @@ pub struct EmulatorWindow {
     scroll_offset: usize,
     large_font: bool,
     start_time: Instant,
+    gamepads: Option<gamepads::Gamepads>,
+    audio: Option<AudioStreamOwner>,
+    error: Option<String>,
+    held_keys: HashSet<KeyCode>,
+    cursor: Option<(i32, i32)>,
 }
 
 impl EmulatorWindow {
@@ -44,14 +54,27 @@ impl EmulatorWindow {
             scroll_offset: 0,
             large_font: false,
             start_time: Instant::now(),
+            gamepads: None,
+            audio: None,
+            error: None,
+            held_keys: HashSet::new(),
+            cursor: None,
         }
     }
 
     pub fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
         let event_loop = EventLoop::new()?;
+        match gamepads::Gamepads::new() {
+            Ok(gamepads) => self.gamepads = Some(gamepads),
+            Err(error) => eprintln!("SDL3 controller input unavailable: {error}"),
+        }
+        match open_audio() {
+            Ok(stream) => self.audio = Some(stream),
+            Err(error) => eprintln!("SDL3 audio playback unavailable: {error}"),
+        }
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut self)?;
-        Ok(())
+        self.error.map_or(Ok(()), |error| Err(error.into()))
     }
 
     fn render_screen(&self, frame: &mut [u8]) {
@@ -64,7 +87,7 @@ impl EmulatorWindow {
         }
 
         if self.cpu.framebuffer.mode() == 1 {
-            // --- Framebuffer Mode (480x270 1:1 into virtual frame) ---
+            // --- Framebuffer Mode (960x540 1:1 into virtual frame) ---
             for fy in 0..FB_HEIGHT {
                 for fx in 0..FB_WIDTH {
                     let c = self.cpu.framebuffer.get_pixel(fx as i32, fy as i32);
@@ -119,16 +142,14 @@ impl EmulatorWindow {
         // Wrap lines if they exceed max_cols
         let mut wrapped_lines = Vec::new();
         for line in &display_lines {
-            if line.len() <= max_cols {
-                wrapped_lines.push(line.clone());
-            } else {
-                let mut start = 0;
-                while start < line.len() {
-                    let end = (start + max_cols).min(line.len());
-                    wrapped_lines.push(line[start..end].to_string());
-                    start = end;
+            let mut start = 0;
+            for (column, (index, _)) in line.char_indices().enumerate() {
+                if column > 0 && column % max_cols == 0 {
+                    wrapped_lines.push(line[start..index].to_string());
+                    start = index;
                 }
             }
+            wrapped_lines.push(line[start..].to_string());
         }
 
         // Calculate view window based on scroll offset
@@ -256,7 +277,7 @@ impl ApplicationHandler for EmulatorWindow {
             let window = match event_loop.create_window(win_attrs) {
                 Ok(w) => Arc::new(w),
                 Err(e) => {
-                    eprintln!("Failed to create window: {}", e);
+                    self.error = Some(format!("Failed to create window: {e}"));
                     event_loop.exit();
                     return;
                 }
@@ -264,18 +285,24 @@ impl ApplicationHandler for EmulatorWindow {
 
             let size = window.inner_size();
             let surface_texture = SurfaceTexture::new(size.width, size.height, window.clone());
-            let pixels = match PixelsBuilder::new(VIRTUAL_WIDTH, VIRTUAL_HEIGHT, surface_texture)
+            let mut pixels = match PixelsBuilder::new(VIRTUAL_WIDTH, VIRTUAL_HEIGHT, surface_texture)
                 .wgpu_backend(Backends::VULKAN)
                 .build()
             {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("Failed to initialize Vulkan pixel buffer: {}", e);
+                    self.error = Some(format!("Failed to initialize Vulkan pixel buffer: {e}"));
                     event_loop.exit();
                     return;
                 }
             };
 
+            pixels.set_scaling_mode(ScalingMode::Fill);
+            if let Err(error) = pixels.resize_surface(size.width, size.height) {
+                self.error = Some(format!("Failed to scale the display: {error}"));
+                event_loop.exit();
+                return;
+            }
             self.window = Some(window);
             self.pixels = Some(pixels);
             self.update_title();
@@ -305,12 +332,46 @@ impl ApplicationHandler for EmulatorWindow {
                     self.scroll_offset = self.scroll_offset.saturating_sub((-lines) as usize);
                 }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, logical_key, text, .. }, .. } => {
+            WindowEvent::Focused(false) => self.held_keys.clear(),
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = self.pixels.as_ref()
+                    .and_then(|pixels| pixels.window_pos_to_pixel((position.x as f32, position.y as f32)).ok())
+                    .map(|(x, y)| (x as i32, y as i32));
+                if let Some((x, y)) = self.cursor {
+                    self.cpu.queue_mouse_move_interrupt(x, y);
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                if let Some((x, y)) = self.cursor {
+                    let button = match button {
+                        MouseButton::Left => 0,
+                        MouseButton::Right => 1,
+                        MouseButton::Middle => 2,
+                        MouseButton::Back => 3,
+                        MouseButton::Forward => 4,
+                        MouseButton::Other(button) => i32::from(button),
+                    };
+                    self.cpu.queue_mouse_click_interrupt(x, y, button);
+                }
+            }
+            WindowEvent::KeyboardInput { event: KeyEvent { state, physical_key, logical_key, text, .. }, .. } => {
+                if let PhysicalKey::Code(code) = physical_key {
+                    match state {
+                        ElementState::Pressed => self.held_keys.insert(code),
+                        ElementState::Released => self.held_keys.remove(&code),
+                    };
+                }
+                if state == ElementState::Released {
+                    return;
+                }
                 match logical_key {
                     Key::Named(NamedKey::F5) => {
                         // Reset CPU and power on
-                        self.cpu.reset();
                         self.cpu.power_on();
+                        if let Some(audio) = &self.audio {
+                            let _ = audio.clear();
+                        }
                         self.scroll_offset = 0;
                     }
                     Key::Named(NamedKey::F2) => {
@@ -355,9 +416,20 @@ impl ApplicationHandler for EmulatorWindow {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let mut masks = self.gamepads.as_mut().map_or([0; 4], gamepads::Gamepads::poll);
+                masks[0] |= self.held_keys.iter().fold(0, |mask, &key| mask | key_mask(key));
+                self.cpu.pad_states = masks;
+
                 // Execute CPU cycles when running
                 if self.cpu.state == State::Running {
                     self.cpu.tick(self.cycles_per_frame);
+                }
+
+                if let (Some(audio), Some(samples)) = (&self.audio, self.cpu.audio.poll_samples()) {
+                    if let Err(error) = audio.put_data(&samples) {
+                        eprintln!("SDL3 audio playback failed: {error}");
+                        self.audio = None;
+                    }
                 }
 
                 // Render screen into pixels frame buffer
@@ -366,7 +438,7 @@ impl ApplicationHandler for EmulatorWindow {
                     let res = pixels.render();
                     self.pixels = Some(pixels);
                     if let Err(e) = res {
-                        eprintln!("Vulkan render error: {}", e);
+                        self.error = Some(format!("Vulkan render error: {e}"));
                         event_loop.exit();
                         return;
                     }
@@ -388,4 +460,35 @@ impl ApplicationHandler for EmulatorWindow {
 pub fn run_emulator_window(cpu: VirtualCpu) -> Result<(), Box<dyn std::error::Error>> {
     let app = EmulatorWindow::new(cpu);
     app.run()
+}
+
+
+fn key_mask(key: KeyCode) -> i32 {
+    use KeyCode::*;
+    let bit = match key {
+        ArrowRight | KeyD => 0,
+        ArrowLeft | KeyA => 1,
+        ArrowDown | KeyS => 2,
+        ArrowUp | KeyW => 3,
+        Enter | NumpadEnter => 4,
+        ShiftLeft | ShiftRight => 5,
+        Space | KeyZ => 6,
+        KeyX => 7,
+        KeyC | KeyJ => 8,
+        KeyV | KeyK => 9,
+        KeyQ | KeyU => 10,
+        KeyE | KeyI => 11,
+        _ => return 0,
+    };
+    1 << bit
+}
+
+
+fn open_audio() -> Result<AudioStreamOwner, Box<dyn std::error::Error>> {
+    let sdl = sdl3::init()?;
+    let audio = sdl.audio()?;
+    let spec = AudioSpec::new(Some(AUDIO_SAMPLE_RATE as i32), Some(1), Some(AudioFormat::U8));
+    let stream = audio.default_playback_device().open_device_stream(Some(&spec))?;
+    stream.resume()?;
+    Ok(stream)
 }

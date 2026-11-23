@@ -36,8 +36,12 @@ impl ProjectResolver {
         path.to_lowercase().ends_with(".n")
     }
 
+    pub fn is_n2_file(path: &str) -> bool {
+        path.to_ascii_lowercase().ends_with(".n2")
+    }
+
     pub fn is_supported_source_file(path: &str) -> bool {
-        Self::is_n_file(path) || Self::is_assembly_file(path)
+        Self::is_n_file(path) || Self::is_n2_file(path) || Self::is_assembly_file(path)
     }
 
     pub fn get_import_directive_arg(raw_line: &str) -> Option<String> {
@@ -254,10 +258,10 @@ impl ProjectResolver {
 
         if selected_entrypoint.is_none() {
             let common_entrypoints = [
-                "main.n", "main.asm", "main.s", "main.S",
-                "entry.n", "entry.asm", "entry.s", "entry.S",
-                "start.asm", "start.s", "start.S", "start.n",
-                "index.n", "index.asm", "index.s", "index.S",
+                "main.n2", "main.n", "main.asm", "main.s", "main.S",
+                "entry.n2", "entry.n", "entry.asm", "entry.s", "entry.S",
+                "start.n2", "start.asm", "start.s", "start.S", "start.n",
+                "index.n2", "index.n", "index.asm", "index.s", "index.S",
             ];
             for cand in &common_entrypoints {
                 if normalized_map.contains_key(*cand) {
@@ -270,7 +274,10 @@ impl ProjectResolver {
         if selected_entrypoint.is_none() {
             for path in normalized_map.keys() {
                 let lower = path.to_lowercase();
-                if lower.ends_with("/main.n")
+                if lower.ends_with("/main.n2")
+                    || lower.ends_with("/entry.n2")
+                    || lower.ends_with("/start.n2")
+                    || lower.ends_with("/main.n")
                     || lower.ends_with("/main.asm")
                     || lower.ends_with("/main.s")
                     || lower.ends_with("/entry.n")
@@ -288,9 +295,13 @@ impl ProjectResolver {
         let entry = match selected_entrypoint {
             Some(e) => e,
             None => {
-                return Err("Project must contain a 'main.n' (or 'main.asm' / 'main.s') entrypoint!".to_string());
+                return Err("Project must contain a main.n2, main.n, main.asm or main.s entrypoint!".to_string());
             }
         };
+
+        if Self::is_n2_file(&entry) {
+            return super::n2::compile_project(&normalized_map, &entry);
+        }
 
         let mut expanded_lines = Vec::new();
         let mut errors = Vec::new();

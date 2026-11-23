@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::Write;
 
-pub const FB_WIDTH: usize = 480;
-pub const FB_HEIGHT: usize = 270;
+pub const FB_WIDTH: usize = 960;
+pub const FB_HEIGHT: usize = 540;
 
 #[derive(Debug, Clone)]
 pub struct Framebuffer {
@@ -69,14 +69,17 @@ impl Framebuffer {
         self.dirty = true;
     }
 
-    pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, mut color: u32) {
         if w <= 0 || h <= 0 {
             return;
         }
+        if color & 0xFF000000 == 0 {
+            color |= 0xFF000000;
+        }
         let start_x = x.max(0) as usize;
-        let end_x = ((x + w) as usize).min(FB_WIDTH);
+        let end_x = x.saturating_add(w).clamp(0, FB_WIDTH as i32) as usize;
         let start_y = y.max(0) as usize;
-        let end_y = ((y + h) as usize).min(FB_HEIGHT);
+        let end_y = y.saturating_add(h).clamp(0, FB_HEIGHT as i32) as usize;
 
         for py in start_y..end_y {
             let row_offset = py * FB_WIDTH;
@@ -87,27 +90,37 @@ impl Framebuffer {
         self.dirty = true;
     }
 
-    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: u32) {
+    pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
+        let (x0, y0, x1, y1) = (i64::from(x0), i64::from(y0), i64::from(x1), i64::from(y1));
         let dx = (x1 - x0).abs();
-        let dy = -(y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-
-        loop {
-            self.set_pixel(x0, y0, color);
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y0 += sy;
-            }
+        let dy = (y1 - y0).abs();
+        let x_major = dx >= dy;
+        let (major_start, major_end, minor_start, minor_end, limit) = if x_major {
+            (x0, x1, y0, y1, FB_WIDTH as i64 - 1)
+        } else {
+            (y0, y1, x0, x1, FB_HEIGHT as i64 - 1)
+        };
+        let major_direction = (major_end - major_start).signum();
+        let minor_direction = (minor_end - minor_start).signum();
+        let steps = dx.max(dy);
+        let minor_steps = dx.min(dy);
+        if steps == 0 {
+            self.set_pixel(x0 as i32, y0 as i32, color);
+            return;
+        }
+        // Skip invisible steps without changing the rounding of the rasterized line.
+        let (first, last) = if major_direction > 0 {
+            ((-major_start).max(0), (limit - major_start).min(steps))
+        } else {
+            ((major_start - limit).max(0), major_start.min(steps))
+        };
+        for step in first..=last {
+            let minor_offset = ((step as u64 * minor_steps as u64 + (steps as u64 - 1) / 2)
+                / steps as u64) as i64;
+            let major = major_start + step * major_direction;
+            let minor = minor_start + minor_offset * minor_direction;
+            let (x, y) = if x_major { (major, minor) } else { (minor, major) };
+            self.set_pixel(x as i32, y as i32, color);
         }
     }
 
@@ -115,35 +128,26 @@ impl Framebuffer {
         if w <= 0 || h <= 0 {
             return;
         }
+        let (x, y, stride) = (i64::from(x), i64::from(y), i64::from(w));
         let ram_slice = ram.as_slice();
-        for row in 0..h {
-            let py = y + row;
-            if py < 0 || py as usize >= FB_HEIGHT {
-                continue;
-            }
-            for col in 0..w {
-                let px = x + col;
-                if px < 0 || px as usize >= FB_WIDTH {
+        for py in y.max(0)..(y + i64::from(h)).min(FB_HEIGHT as i64) {
+            for px in x.max(0)..(x + stride).min(FB_WIDTH as i64) {
+                let offset = (py - y) * stride + px - x;
+                let Some(src) = usize::try_from(offset).ok().and_then(|offset| ram_src.checked_add(offset)) else {
                     continue;
-                }
-                let src_idx = ram_src + (row as usize * w as usize) + col as usize;
-                if src_idx < ram_slice.len() {
-                    let mut color = ram_slice[src_idx] as u32;
-                    if (color & 0xFF000000) == 0 {
-                        color |= 0xFF000000;
-                    }
-                    self.pixels[(py as usize) * FB_WIDTH + px as usize] = color;
+                };
+                if let Some(&color) = ram_slice.get(src) {
+                    self.set_pixel(px as i32, py as i32, color as u32);
                 }
             }
         }
-        self.dirty = true;
     }
 
     pub fn render_ascii(&self) -> String {
         let mut out = String::new();
         // Downscale to 60 columns x 30 lines
-        const SCALE_X: usize = 8;
-        const SCALE_Y: usize = 9;
+        const SCALE_X: usize = 16;
+        const SCALE_Y: usize = 18;
         let out_w = FB_WIDTH / SCALE_X;
         let out_h = FB_HEIGHT / SCALE_Y;
 

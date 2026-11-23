@@ -1,0 +1,92 @@
+name: Release emulator
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emulator-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            binary: siliconcraft-emulator
+          - platform: windows-x86_64
+            runner: windows-2022
+            binary: siliconcraft-emulator.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux SDL3 development dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libusb-1.0-0-dev
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.100.0 --profile minimal
+
+      - name: Test release build
+        run: cargo +1.100.0 test --release --locked
+
+      - name: Build emulator
+        run: cargo +1.100.0 build --release --locked
+
+      - name: Archive Linux binary
+        if: runner.os == 'Linux'
+        env:
+          ASSET: siliconcraft-emulator-${{ matrix.platform }}.tar.gz
+          BINARY: ${{ matrix.binary }}
+        run: |
+          mkdir package
+          cp "target/release/$BINARY" README.md package/
+          tar -czf "$ASSET" -C package "$BINARY" README.md
+
+      - name: Archive Windows binary
+        if: runner.os == 'Windows'
+        env:
+          ASSET: siliconcraft-emulator-${{ matrix.platform }}.zip
+          BINARY: ${{ matrix.binary }}
+        run: Compress-Archive -Path "target/release/$env:BINARY", README.md -DestinationPath $env:ASSET
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: siliconcraft-emulator-${{ matrix.platform }}.*
+          if-no-files-found: error
+
+  publish:
+    name: Publish Windows and Linux together
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            release-assets/siliconcraft-emulator-linux-x86_64.tar.gz \
+            release-assets/siliconcraft-emulator-windows-x86_64.zip
