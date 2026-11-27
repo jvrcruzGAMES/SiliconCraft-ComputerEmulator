@@ -334,11 +334,11 @@ fn main() {
 
     if dump_fb {
         println!("\n=== Framebuffer ASCII View (960x540) ===");
-        print!("{}", cpu.framebuffer.render_ascii());
+        print!("{}", cpu.active_framebuffer().render_ascii());
     }
 
     if let Some(ppm_path) = save_fb {
-        match cpu.framebuffer.save_ppm(&ppm_path) {
+        match cpu.active_framebuffer().save_ppm(&ppm_path) {
             Ok(_) => println!("Framebuffer image saved to: {}", ppm_path),
             Err(e) => eprintln!("Failed to save framebuffer to '{}': {}", ppm_path, e),
         }

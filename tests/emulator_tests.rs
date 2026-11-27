@@ -563,3 +563,56 @@ fn outc_decodes_utf8_and_preserves_blank_lines() {
     cpu.execute_cycles(20);
     assert_eq!(&cpu.terminal_output[..3], &["á", "", "Olá"]);
 }
+
+#[test]
+fn peripheral_text_instructions_use_utf16_and_consume_the_mailbox() {
+    use siliconcraft_emulator::cpu::peripheral::{Peripheral, PeripheralResponse};
+
+    struct Device;
+    impl Peripheral for Device {
+        fn automatic(&self) -> bool {
+            true
+        }
+
+        fn invoke(&mut self, method: i32, _: i32, _: i32) -> Option<PeripheralResponse> {
+            let text = if method == 0 { "😀Z".to_owned() } else { "x".repeat(8193) };
+            Some(PeripheralResponse::text(text))
+        }
+
+        fn invoke_string(&mut self, _: i32, text: &str, _: i32) -> Option<PeripheralResponse> {
+            Some(PeripheralResponse::text(text.to_owned()))
+        }
+    }
+
+    let mut cpu = VirtualCpu::new(400);
+    cpu.peripheral_bus.attach(0, Device);
+    cpu.burn_to_rom(&[
+        "PCALL A, 0, 0, 0, 0",
+        "PLEN [0]",
+        "PLEN [1]",
+        "PRESULTS [2], 10, 3",
+        "PSTATUS [3]",
+        "PLEN [4]",
+        "PCALL A, 0, 0, 0, 0",
+        "PRESULT [5]",
+        "PLEN [6]",
+        "PCALL A, 0, 1, 0, 0",
+        "PSTATUS [7]",
+        "PRESULTS [8], 400, 0",
+        "PSTATUS [9]",
+        "PCALLS A, 0, 0, 100, 0",
+        "PLEN [13]",
+        "PRESULTS [14], 20, 80",
+        "HLT",
+    ]);
+    cpu.ram.as_mut_slice()[10..14].fill(-1);
+    cpu.ram.as_mut_slice()[100..170].fill(65);
+    cpu.execute_cycles(100);
+
+    assert_eq!(cpu.state, State::Halted);
+    assert_eq!(&cpu.ram.as_slice()[..10], &[3, 3, 2, 0, 0, 3, 0, -4, 0, 0]);
+    assert_eq!(&cpu.ram.as_slice()[10..13], &[0xd83d, 0xde00, 0]);
+    assert_eq!(&cpu.ram.as_slice()[13..15], &[70, 70]);
+    assert_eq!(cpu.ram.read(20), Ok(65));
+    assert_eq!(cpu.ram.read(90), Ok(0));
+}

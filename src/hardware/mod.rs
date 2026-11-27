@@ -1,6 +1,7 @@
 pub mod ram;
 pub mod storage;
 pub mod framebuffer;
+pub(crate) mod gpu;
 pub mod audio;
 
 pub use ram::Ram;

@@ -41,6 +41,11 @@ impl Framebuffer {
         &self.pixels
     }
 
+    pub(crate) fn copy_pixels_from(&mut self, source: &Self) {
+        self.pixels.copy_from_slice(&source.pixels);
+        self.dirty = true;
+    }
+
     pub fn set_pixel(&mut self, x: i32, y: i32, mut color: u32) {
         if (color & 0xFF000000) == 0 {
             color |= 0xFF000000;

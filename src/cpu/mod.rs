@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use instruction::{CompiledInstruction, Opcode, Operand, Register};
 use assembler::Assembler;
+use crate::hardware::gpu::{Command as GpuCommand, Gpu};
 use crate::hardware::{AudioSubsystem, Framebuffer, Ram, StorageSubsystem};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,10 +64,12 @@ const INSTRUCTIONS: &[&str] = &[
     "SEXEC", "SBOOT", "FBMODE", "DMODE", "FBSET", "PIX", "FBGET", "FBCLR",
     "FCLR", "FBRECT", "RECT", "FBLINE", "LINE", "FBLIT", "FBSWAP", "FBWIDTH",
     "FBHEIGHT", "APUSH", "ABUFW", "ACLR", "ASTAT", "ATONE", "TONE", "APLAY",
-    "PINFO", "PWRAP", "PCALL", "PCALLS", "PSTATUS", "PRESULT", "PSCAN",
+    "PINFO", "PWRAP", "PCALL", "PCALLS", "PSTATUS", "PRESULT", "PLEN", "PRESULTS", "PSCAN",
     "NOPEN", "NSEND", "NRECV", "NCLOSE", "NHTTP", "NSTATUS", "NLEN", "NRESULT",
     "NWSOPEN", "NWSTEXT", "NTLS", "NHTTP3", "NLISTEN", "NACCEPT", "NRESPOND",
     "NRESPONDT", "NREADY", "NUTF8", "GALLOC",
+    "INAXIS", "GFXSEL", "GFXSTAT", "GPUCLR", "GPURECT", "GPULINE",
+    "GPUCIRC", "GPUTRI", "GPUVRAM", "GPUBLIT", "GPUSWAP", "GPUSYNC",
     "HLT", "ORG", "DB", "DW", "DL", "INCBIN"
 ];
 
@@ -99,6 +102,7 @@ pub struct VirtualCpu {
     pub peripheral_bus: peripheral::PeripheralBus,
     pub network_port: network::NetworkPort,
     pub pad_states: [i32; 4],
+    pad_axes: [[i32; 6]; 4],
     pub terminal_output: Vec<String>,
     pub line_buffer: String,
     utf8_bytes: Vec<u8>,
@@ -106,6 +110,7 @@ pub struct VirtualCpu {
     pub ram: Ram,
     pub storage: StorageSubsystem,
     pub framebuffer: Framebuffer,
+    gpu: Gpu,
     pub audio: AudioSubsystem,
 
     pub rom: Vec<String>,
@@ -155,6 +160,7 @@ impl VirtualCpu {
             peripheral_bus: peripheral::PeripheralBus::default(),
             network_port: network::NetworkPort::default(),
             pad_states: [0; 4],
+            pad_axes: [[0; 6]; 4],
             terminal_output: Vec::new(),
             line_buffer: String::new(),
             utf8_bytes: Vec::new(),
@@ -162,6 +168,7 @@ impl VirtualCpu {
             ram: Ram::new(ram_words),
             storage: StorageSubsystem::new(),
             framebuffer: Framebuffer::new(),
+            gpu: Gpu::new(),
             audio: AudioSubsystem::new(),
 
             rom: Vec::new(),
@@ -353,6 +360,7 @@ impl VirtualCpu {
         self.timer_hz = 0;
         self.timer_interval_cycles = 0;
         self.pad_states = [0; 4];
+        self.pad_axes = [[0; 6]; 4];
         self.key_buffer.clear();
         self.peripheral_bus.reset();
         self.network_port.reset();
@@ -361,6 +369,7 @@ impl VirtualCpu {
         self.utf8_bytes.clear();
         self.framebuffer.set_mode(0);
         self.framebuffer.clear(0xFF051009);
+        self.gpu.reset();
         let drive = (0..crate::hardware::storage::MAX_DRIVES)
             .find(|&drive| self.storage.capacity(drive) > 0).unwrap_or(0);
         let _ = self.storage.select_drive(drive);
@@ -389,6 +398,9 @@ impl VirtualCpu {
     pub fn power_off(&mut self) {
         self.flush_line_buffer();
         self.state = State::Off;
+        self.gpu.discard_commands();
+        self.pad_states = [0; 4];
+        self.pad_axes = [[0; 6]; 4];
         self.peripheral_bus.reset();
         self.network_port.reset();
         self.audio.clear();
@@ -501,9 +513,21 @@ impl VirtualCpu {
     }
 
     pub fn set_pad_state(&mut self, pad_idx: usize, mask: i32) {
-        if pad_idx < 4 {
-            self.pad_states[pad_idx] = mask;
+        self.set_gamepad_state(pad_idx, mask, [0; 6]);
+    }
+
+    pub fn set_gamepad_state(&mut self, pad_idx: usize, buttons: i32, mut axes: [i32; 6]) {
+        if pad_idx < self.pad_states.len() {
+            for (axis, value) in axes.iter_mut().enumerate() {
+                *value = (*value).clamp(if axis < 4 { -1000 } else { 0 }, 1000);
+            }
+            self.pad_states[pad_idx] = buttons & 0xffff;
+            self.pad_axes[pad_idx] = axes;
         }
+    }
+
+    pub fn active_framebuffer(&self) -> &Framebuffer {
+        if self.gpu.selected() { &self.gpu.front } else { &self.framebuffer }
     }
 
     pub fn set_timer_hz(&mut self, hz: i32) {
@@ -731,6 +755,7 @@ impl VirtualCpu {
             return;
         }
         self.execute_next_instruction();
+        self.gpu.advance();
     }
 
     pub fn tick(&mut self, max_cycles: usize) {
@@ -742,6 +767,7 @@ impl VirtualCpu {
             self.check_and_dispatch_interrupt();
             if self.sleep_ticks_remaining > 0 {
                 self.sleep_ticks_remaining -= 1;
+                self.gpu.advance();
                 return;
             }
         }
@@ -761,6 +787,7 @@ impl VirtualCpu {
                 break;
             }
         }
+        self.gpu.advance();
     }
 
     pub fn execute_next_instruction(&mut self) {
@@ -823,7 +850,7 @@ impl VirtualCpu {
                 let arg0 = self.resolve_value(&parts[3])?;
                 let arg1 = self.resolve_value(&parts[4])?;
                 if opcode == Opcode::PCALLS {
-                    Operation::CallString(method, self.read_guest_string(arg0, 64)?, arg1)
+                    Operation::CallString(method, self.read_guest_string(arg0, 256)?, arg1)
                 } else {
                     Operation::Call(method, arg0, arg1)
                 }
@@ -832,6 +859,23 @@ impl VirtualCpu {
         };
         self.peripheral_bus.submit(address, operation);
         self.set_destination(&parts[0], 1)
+    }
+
+    fn read_peripheral_text(&mut self, args: &str) -> Result<(), String> {
+        let parts = instruction_args(args, 3)?;
+        let range = self.guest_range(self.resolve_value(&parts[1])?, self.resolve_value(&parts[2])?)?;
+        let text = self.peripheral_bus.take_text();
+        let buffer = &mut self.ram.as_mut_slice()[range];
+        let max_chars = buffer.len().saturating_sub(1);
+        let mut count = 0;
+        for (cell, unit) in buffer.iter_mut().take(max_chars).zip(text.encode_utf16()) {
+            *cell = i32::from(unit);
+            count += 1;
+        }
+        if let Some(terminator) = buffer.get_mut(count) {
+            *terminator = 0;
+        }
+        self.set_destination(&parts[0], count as i32)
     }
 
     fn read_guest_string(&self, address: i32, limit: usize) -> Result<String, String> {
@@ -966,7 +1010,7 @@ impl VirtualCpu {
 
     fn guest_range(&self, address: i32, length: i32) -> Result<std::ops::Range<usize>, String> {
         if address < 0 || length < 0 || i64::from(address) + i64::from(length) > self.ram.len() as i64 {
-            return Err("Network buffer out of bounds".to_string());
+            return Err("Guest buffer out of bounds".to_string());
         }
         let start = address as usize;
         Ok(start..start + length as usize)
@@ -1020,6 +1064,59 @@ impl VirtualCpu {
         } else {
             self.storage.block_read(drive, disk, &mut self.ram, memory, count)
         }
+    }
+
+    fn exec_gpu(&mut self, opcode: Opcode, args: &str) -> Result<(), String> {
+        let values = |count| -> Result<Vec<i32>, String> {
+            instruction_args(args, count)?.iter().map(|arg| self.resolve_value(arg)).collect()
+        };
+        let command = match opcode {
+            Opcode::GPUCLR => GpuCommand::Clear(self.resolve_value(args)? as u32),
+            Opcode::GPURECT | Opcode::GPULINE => {
+                let [x, y, w, h, color]: [i32; 5] = values(5)?.try_into().unwrap();
+                if opcode == Opcode::GPURECT {
+                    GpuCommand::Rect([x, y, w, h], color as u32)
+                } else {
+                    GpuCommand::Line([x, y, w, h], color as u32)
+                }
+            }
+            Opcode::GPUCIRC => {
+                let parts = Assembler::split_args(args, usize::MAX);
+                if !(4..=5).contains(&parts.len()) {
+                    return Err("GPUCIRC requires cx, cy, radius, color [, filled]".into());
+                }
+                let value = |i: usize| self.resolve_value(&parts[i]);
+                let filled = parts.len() == 4 || value(4)? != 0;
+                GpuCommand::Circle(value(0)?, value(1)?, value(2)?, value(3)? as u32, filled)
+            }
+            Opcode::GPUTRI => {
+                let range = self.guest_range(self.resolve_value(args)?, 7)?;
+                let &[x0, y0, x1, y1, x2, y2, color] =
+                    <&[i32; 7]>::try_from(&self.ram.as_slice()[range]).unwrap();
+                GpuCommand::Triangle([(x0, y0), (x1, y1), (x2, y2)], color as u32)
+            }
+            Opcode::GPUVRAM => {
+                let [offset, source, count]: [i32; 3] = values(3)?.try_into().unwrap();
+                return self.gpu.upload(offset, source, count, &self.ram);
+            }
+            Opcode::GPUBLIT => {
+                let [x, y, offset, w, h]: [i32; 5] = values(5)?.try_into().unwrap();
+                return self.gpu.blit([x, y, w, h], offset);
+            }
+            Opcode::GPUSWAP => {
+                self.framebuffer.set_mode(1);
+                self.gpu.submit(GpuCommand::Swap);
+                self.gpu.flush();
+                return Ok(());
+            }
+            Opcode::GPUSYNC => {
+                self.gpu.flush();
+                return Ok(());
+            }
+            _ => unreachable!(),
+        };
+        self.gpu.submit(command);
+        Ok(())
     }
 
     fn exec_op(&mut self, ci: &CompiledInstruction, line_num: usize) -> Result<(), String> {
@@ -1405,9 +1502,18 @@ impl VirtualCpu {
                 };
                 self.set_destination(dest, value)
             }
+            Opcode::INAXIS => {
+                let parts = instruction_args(&ci.raw_args, 3)?;
+                let pad = self.resolve_value(&parts[1])? as usize;
+                let axis = self.resolve_value(&parts[2])? as usize;
+                let value = self.pad_axes.get(pad).and_then(|axes| axes.get(axis)).copied().unwrap_or(0);
+                self.set_destination(&parts[0], value)
+            }
             Opcode::PINFO | Opcode::PWRAP | Opcode::PCALL | Opcode::PCALLS | Opcode::PSCAN =>
                 self.submit_peripheral(ci.opcode, &ci.raw_args),
             Opcode::PSTATUS => self.set_destination(&ci.raw_args, self.peripheral_bus.status()),
+            Opcode::PLEN => self.set_destination(&ci.raw_args, self.peripheral_bus.text_length()),
+            Opcode::PRESULTS => self.read_peripheral_text(&ci.raw_args),
             Opcode::PRESULT => {
                 let value = self.peripheral_bus.take_result();
                 self.set_destination(&ci.raw_args, value)
@@ -1528,9 +1634,35 @@ impl VirtualCpu {
                 self.flush_line_buffer();
                 Ok(())
             }
+            Opcode::GFXSEL => {
+                self.gpu.handler = match self.resolve_value(&ci.raw_args)? {
+                    mode @ (1 | 2) => mode,
+                    _ => 0,
+                };
+                self.flag_z = !self.gpu.selected();
+                self.flag_s = false;
+                Ok(())
+            }
+            Opcode::GFXSTAT => {
+                let parts = Assembler::split_args(&ci.raw_args, usize::MAX);
+                let (dest, query) = match parts.as_slice() {
+                    [dest] => (dest, 0),
+                    [dest, query] => (dest, self.resolve_value(query)?),
+                    _ => return Err("GFXSTAT requires dest [, query]".into()),
+                };
+                let result = self.gpu.status(query);
+                self.set_destination(dest, result)?;
+                self.flag_z = result == 0;
+                self.flag_s = result < 0;
+                Ok(())
+            }
+            Opcode::GPUCLR | Opcode::GPURECT | Opcode::GPULINE | Opcode::GPUCIRC
+            | Opcode::GPUTRI | Opcode::GPUVRAM | Opcode::GPUBLIT | Opcode::GPUSWAP
+            | Opcode::GPUSYNC => self.exec_gpu(ci.opcode, &ci.raw_args),
             Opcode::FBMODE => {
                 let mode = self.resolve_value(&ci.raw_args)?;
                 self.framebuffer.set_mode(mode);
+                self.gpu.front.set_mode(mode);
                 Ok(())
             }
             Opcode::FBSET => {
@@ -1539,7 +1671,11 @@ impl VirtualCpu {
                 let x = self.resolve_value(&parts[0])?;
                 let y = self.resolve_value(&parts[1])?;
                 let color = self.resolve_value(&parts[2])? as u32;
-                self.framebuffer.set_pixel(x, y, color);
+                if self.gpu.selected() {
+                    self.gpu.submit(GpuCommand::Pixel(x, y, color));
+                } else {
+                    self.framebuffer.set_pixel(x, y, color);
+                }
                 Ok(())
             }
             Opcode::FBGET => {
@@ -1547,7 +1683,11 @@ impl VirtualCpu {
                 if parts.len() != 3 { return Err("FBGET requires dest, x, y".to_string()); }
                 let x = self.resolve_value(&parts[1])?;
                 let y = self.resolve_value(&parts[2])?;
-                let color = self.framebuffer.get_pixel(x, y) as i32;
+                let color = if self.gpu.selected() {
+                    self.gpu.read_back(x, y)
+                } else {
+                    self.framebuffer.get_pixel(x, y)
+                } as i32;
                 self.set_destination(&parts[0], color)
             }
             Opcode::FBCLR => {
@@ -1556,7 +1696,11 @@ impl VirtualCpu {
                 } else {
                     0xFF051009
                 };
-                self.framebuffer.clear(color);
+                if self.gpu.selected() {
+                    self.gpu.submit(GpuCommand::Clear(color));
+                } else {
+                    self.framebuffer.clear(color);
+                }
                 Ok(())
             }
             Opcode::FBRECT => {
@@ -1567,7 +1711,11 @@ impl VirtualCpu {
                 let w = self.resolve_value(&parts[2])?;
                 let h = self.resolve_value(&parts[3])?;
                 let color = self.resolve_value(&parts[4])? as u32;
-                self.framebuffer.fill_rect(x, y, w, h, color);
+                if self.gpu.selected() {
+                    self.gpu.submit(GpuCommand::Rect([x, y, w, h], color));
+                } else {
+                    self.framebuffer.fill_rect(x, y, w, h, color);
+                }
                 Ok(())
             }
             Opcode::FBLINE => {
@@ -1578,7 +1726,11 @@ impl VirtualCpu {
                 let x1 = self.resolve_value(&parts[2])?;
                 let y1 = self.resolve_value(&parts[3])?;
                 let color = self.resolve_value(&parts[4])? as u32;
-                self.framebuffer.draw_line(x0, y0, x1, y1, color);
+                if self.gpu.selected() {
+                    self.gpu.submit(GpuCommand::Line([x0, y0, x1, y1], color));
+                } else {
+                    self.framebuffer.draw_line(x0, y0, x1, y1, color);
+                }
                 Ok(())
             }
             Opcode::FBLIT => {
@@ -1586,15 +1738,23 @@ impl VirtualCpu {
                 if parts.len() != 5 { return Err("FBLIT requires x, y, ram_src, w, h".to_string()); }
                 let x = self.resolve_value(&parts[0])?;
                 let y = self.resolve_value(&parts[1])?;
-                let ram_src = self.resolve_value(&parts[2])? as usize;
+                let ram_src = self.resolve_value(&parts[2])?;
                 let w = self.resolve_value(&parts[3])?;
                 let h = self.resolve_value(&parts[4])?;
-                self.framebuffer.blit(x, y, w, h, &self.ram, ram_src);
+                if self.gpu.selected() {
+                    self.gpu.blit_ram([x, y, w, h], ram_src, &self.ram);
+                } else {
+                    self.framebuffer.blit(x, y, w, h, &self.ram, ram_src as usize);
+                }
                 Ok(())
             }
             Opcode::FBSWAP => {
                 self.framebuffer.set_mode(1);
-                self.framebuffer.set_dirty(true);
+                self.gpu.front.set_mode(1);
+                if self.gpu.selected() {
+                    self.gpu.submit(GpuCommand::Swap);
+                    self.gpu.flush();
+                }
                 Ok(())
             }
             Opcode::FBWIDTH => self.set_destination(&ci.raw_args, crate::hardware::framebuffer::FB_WIDTH as i32),

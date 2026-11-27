@@ -1,6 +1,12 @@
 use sdl3::gamepad::{Axis, Button, Gamepad};
 use sdl3::{EventPump, GamepadSubsystem};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Sample {
+    pub buttons: i32,
+    pub axes: [i32; 6],
+}
+
 pub(super) struct Gamepads {
     events: EventPump,
     devices: [Option<Gamepad>; 4],
@@ -18,7 +24,7 @@ impl Gamepads {
         })
     }
 
-    pub(super) fn poll(&mut self) -> [i32; 4] {
+    pub(super) fn poll(&mut self) -> [Sample; 4] {
         // Winit owns the window. SDL processes controller events only.
         for _ in self.events.poll_iter() {}
         self.subsystem.update();
@@ -41,31 +47,58 @@ impl Gamepads {
                 }
             }
         }
-        std::array::from_fn(|port| self.devices[port].as_ref().map_or(0, controller_mask))
+        std::array::from_fn(|port| {
+            self.devices[port]
+                .as_ref()
+                .map_or_else(Sample::default, controller_sample)
+        })
     }
 }
 
-fn controller_mask(pad: &Gamepad) -> i32 {
-    let x = pad.axis(Axis::LeftX);
-    let y = pad.axis(Axis::LeftY);
+fn controller_sample(pad: &Gamepad) -> Sample {
+    let sample = |axis, trigger| {
+        let raw = f64::from(pad.axis(axis));
+        let normalized = raw / if raw < 0.0 { 32768.0 } else { 32767.0 };
+        if trigger {
+            (normalized.max(0.0) * 1000.0 + 0.5).floor() as i32
+        } else if normalized.abs() <= 0.15 {
+            0
+        } else {
+            (normalized * 1000.0 + 0.5).floor() as i32
+        }
+    };
+    let axes = [
+        sample(Axis::LeftX, false),
+        sample(Axis::LeftY, false),
+        sample(Axis::RightX, false),
+        sample(Axis::RightY, false),
+        sample(Axis::TriggerLeft, true),
+        sample(Axis::TriggerRight, true),
+    ];
+    let [x, y, _, _, left_trigger, right_trigger] = axes;
     let pressed = [
-        pad.button(Button::DPadRight) || x > 16_383,
-        pad.button(Button::DPadLeft) || x < -16_384,
-        pad.button(Button::DPadDown) || y > 16_383,
-        pad.button(Button::DPadUp) || y < -16_384,
+        pad.button(Button::DPadRight) || x > 500,
+        pad.button(Button::DPadLeft) || x < -500,
+        pad.button(Button::DPadDown) || y > 500,
+        pad.button(Button::DPadUp) || y < -500,
         pad.button(Button::Start),
         pad.button(Button::Back),
         pad.button(Button::South),
         pad.button(Button::East),
         pad.button(Button::West),
         pad.button(Button::North),
-        pad.button(Button::LeftShoulder) || pad.axis(Axis::TriggerLeft) > 16_383,
-        pad.button(Button::RightShoulder) || pad.axis(Axis::TriggerRight) > 16_383,
+        pad.button(Button::LeftShoulder) || left_trigger > 500,
+        pad.button(Button::RightShoulder) || right_trigger > 500,
+        left_trigger > 500,
+        right_trigger > 500,
+        pad.button(Button::LeftStick),
+        pad.button(Button::RightStick),
     ];
-    pressed
+    let buttons = pressed
         .into_iter()
         .enumerate()
-        .fold(0, |mask, (bit, down)| mask | (i32::from(down) << bit))
+        .fold(0, |mask, (bit, down)| mask | (i32::from(down) << bit));
+    Sample { buttons, axes }
 }
 
 #[cfg(test)]
@@ -94,12 +127,15 @@ mod tests {
             .unwrap();
 
         let mut cpu = VirtualCpu::default();
-        cpu.burn_to_rom(&["INPAD A", "HLT"]);
-        cpu.pad_states = pads.poll();
+        cpu.burn_to_rom(&["INPAD A", "INAXIS B, 0, 0", "HLT"]);
+        let sample = pads.poll()[0];
+        cpu.set_gamepad_state(0, sample.buttons, sample.axes);
         cpu.execute_cycles(10);
         assert_eq!(cpu.reg_a, 1 | (1 << 6));
 
+        assert_eq!(cpu.reg_b, 610);
+
         drop(virtual_pad);
-        assert_eq!(pads.poll(), [0; 4]);
+        assert_eq!(pads.poll(), [Sample::default(); 4]);
     }
 }

@@ -38,7 +38,7 @@ A high-performance, cycle-accurate standalone emulator and toolchain for the **S
   - Interrupts & System: `IVEC`, `IRET`, `CLI`, `STI`, `INT`, `TIMER` (configurable 1-60 Hz hardware periodic timer), `VBLANK`
   - Storage Subsystem: `SSIZE`, `SREAD`, `SWRITE`, `SBLKR`, `SBLKW`, `SCOUNT`, `SSEL`, `SDRV`, `SEXEC` (three installed drives at 2 GiB each)
   - Color Framebuffer (960x540): `FBMODE`, `FBSET`, `FBGET`, `FBCLR`, `FBRECT`, `FBLINE`, `FBLIT`, `FBSWAP`, `FBWIDTH`, `FBHEIGHT`
-  - Peripherals: `PSCAN`, `PINFO`, `PWRAP`, `PCALL`, `PCALLS`, `PSTATUS`, `PRESULT`. Embedders can attach devices by address through the Rust `Peripheral` trait.
+  - Peripherals: `PSCAN`, `PINFO`, `PWRAP`, `PCALL`, `PCALLS`, `PSTATUS`, `PRESULT`, `PLEN`, `PRESULTS`. Embedders can attach devices through the Rust `Peripheral` trait and return text through `PeripheralResponse`. `PLEN dst` reads the response length in UTF-16 cells. `PRESULTS dst, ptr, capacity` consumes the response, copies text with a zero terminator when capacity is positive, and returns the number of cells copied.
   - Networking: `NOPEN`, `NSEND`, `NRECV`, `NCLOSE`, `NHTTP`, `NHTTP3`, `NWSOPEN`, `NWSTEXT`, `NTLS`, `NLISTEN`, `NACCEPT`, `NRESPOND`, `NRESPONDT`, `NSTATUS`, `NLEN`, `NRESULT`, `NREADY`, `NUTF8`. TCP, UDP, SMTP/IMAP (plain or TLS), HTTP(S), HTTP/3 and WebSocket clients work for explicitly enabled host and port pairs. TCP, UDP, HTTP(S) and WebSocket listeners work on ports enabled with `--allow-listen`.
   - Managed Guest Heap: `GALLOC size, base` (conservative mark-and-sweep allocator used by compiled N2 programs)
   - Audio Synthesizer: `APUSH`, `ABUFW`, `ACLR`, `ASTAT`, `ATONE`, `APLAY` (8000 Hz 8-bit unsigned PCM)
@@ -67,6 +67,26 @@ A high-performance, cycle-accurate standalone emulator and toolchain for the **S
   - Full CPU register and memory dumping (`--dump-regs`, `--dump-ram <start> <words>`)
 
 ---
+
+## GPU and analog controllers
+
+The emulator starts with the CPU framebuffer selected, with a virtual GPU
+installed (2 MiB VRAM, four compute units). Use `GFXSEL 0` for automatic GPU
+selection, `GFXSEL 1` for the CPU, or `GFXSEL 2` for the GPU. In GPU mode
+the window and framebuffer exports show the most recently presented frame.
+
+- `GFXSTAT dst [, query]` reports GPU presence (0), active GPU use (1),
+  handler (2), VRAM bytes (3), VRAM KiB (4), executed commands (5),
+  compute units (6), busy status (7), or presented frames (8).
+- `GPUCLR color`, `GPURECT x, y, w, h, color`, `GPULINE x1, y1, x2, y2, color`,
+  and `GPUCIRC x, y, radius, color [, filled]` draw into the back buffer.
+  `GPUTRI ptr` reads six vertex coordinates followed by a color from RAM.
+- `GPUVRAM offset, ram_src, count` uploads 32-bit cells and
+  `GPUBLIT x, y, offset, w, h` draws alpha-blended pixels from VRAM.
+  `GPUSYNC` completes queued work and `GPUSWAP` presents it.
+- `INAXIS dst, pad, axis` reads SDL3 analog input. Axes 0–3 are left X/Y
+  and right X/Y (−1000 to 1000, with positive Y down). Axes 4 and 5 are the
+  triggers (0 to 1000). Disconnected pads return zero.
 
 ## Building
 

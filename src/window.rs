@@ -90,7 +90,7 @@ impl EmulatorWindow {
             // --- Framebuffer Mode (960x540 1:1 into virtual frame) ---
             for fy in 0..FB_HEIGHT {
                 for fx in 0..FB_WIDTH {
-                    let c = self.cpu.framebuffer.get_pixel(fx as i32, fy as i32);
+                    let c = self.cpu.active_framebuffer().get_pixel(fx as i32, fy as i32);
                     let r = ((c >> 16) & 0xFF) as u8;
                     let g = ((c >> 8) & 0xFF) as u8;
                     let b = (c & 0xFF) as u8;
@@ -416,9 +416,11 @@ impl ApplicationHandler for EmulatorWindow {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let mut masks = self.gamepads.as_mut().map_or([0; 4], gamepads::Gamepads::poll);
-                masks[0] |= self.held_keys.iter().fold(0, |mask, &key| mask | key_mask(key));
-                self.cpu.pad_states = masks;
+                let mut pads = self.gamepads.as_mut().map_or([Default::default(); 4], gamepads::Gamepads::poll);
+                pads[0].buttons |= self.held_keys.iter().fold(0, |mask, &key| mask | key_mask(key));
+                for (port, pad) in pads.into_iter().enumerate() {
+                    self.cpu.set_gamepad_state(port, pad.buttons, pad.axes);
+                }
 
                 // Execute CPU cycles when running
                 if self.cpu.state == State::Running {

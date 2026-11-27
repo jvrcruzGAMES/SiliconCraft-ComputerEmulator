@@ -1,5 +1,29 @@
 use std::collections::BTreeMap;
 
+const MAX_TEXT_RESULT: usize = 8192;
+
+#[derive(Default)]
+pub struct PeripheralResponse {
+    pub value: i32,
+    pub text: String,
+}
+
+impl PeripheralResponse {
+    pub fn number(value: i32) -> Self {
+        Self {
+            value,
+            text: String::new(),
+        }
+    }
+
+    pub fn text(text: String) -> Self {
+        Self {
+            value: text.encode_utf16().count() as i32,
+            text,
+        }
+    }
+}
+
 /// A device supplied by the emulator host at a SiliconCraft peripheral address.
 pub trait Peripheral {
     fn automatic(&self) -> bool {
@@ -12,6 +36,18 @@ pub trait Peripheral {
 
     fn call_string(&mut self, _method: i32, _text: &str, _arg1: i32) -> Option<i32> {
         None
+    }
+
+    /// Override to return text or a numeric value and text from a PCALL.
+    fn invoke(&mut self, method: i32, arg0: i32, arg1: i32) -> Option<PeripheralResponse> {
+        self.call(method, arg0, arg1)
+            .map(PeripheralResponse::number)
+    }
+
+    /// Override to return text or a numeric value and text from a PCALLS.
+    fn invoke_string(&mut self, method: i32, text: &str, arg1: i32) -> Option<PeripheralResponse> {
+        self.call_string(method, text, arg1)
+            .map(PeripheralResponse::number)
     }
 }
 
@@ -27,7 +63,7 @@ pub(super) enum Operation {
 pub struct PeripheralBus {
     devices: BTreeMap<i32, (Box<dyn Peripheral>, bool)>,
     pending: Option<(i32, Operation)>,
-    result: Option<(i32, i32)>,
+    result: Option<(i32, PeripheralResponse)>,
 }
 
 impl PeripheralBus {
@@ -54,11 +90,24 @@ impl PeripheralBus {
 
     pub(super) fn status(&self) -> i32 {
         self.result
-            .map_or(i32::from(self.pending.is_some()), |(status, _)| status)
+            .as_ref()
+            .map_or(i32::from(self.pending.is_some()), |(status, _)| *status)
     }
 
     pub(super) fn take_result(&mut self) -> i32 {
-        self.result.take().map_or(0, |(_, value)| value)
+        self.result.take().map_or(0, |(_, response)| response.value)
+    }
+
+    pub(super) fn text_length(&self) -> i32 {
+        self.result.as_ref().map_or(0, |(_, response)| {
+            response.text.encode_utf16().count() as i32
+        })
+    }
+
+    pub(super) fn take_text(&mut self) -> String {
+        self.result
+            .take()
+            .map_or_else(String::new, |(_, response)| response.text)
     }
 
     pub(super) fn service(&mut self) {
@@ -67,7 +116,7 @@ impl PeripheralBus {
         }
     }
 
-    fn execute(&mut self, address: i32, operation: Operation) -> (i32, i32) {
+    fn execute(&mut self, address: i32, operation: Operation) -> (i32, PeripheralResponse) {
         if matches!(operation, Operation::Scan) {
             let next = self
                 .devices
@@ -77,29 +126,37 @@ impl PeripheralBus {
                 ))
                 .next()
                 .map_or(-1, |(&port, _)| port);
-            return (2, next);
+            return (2, PeripheralResponse::number(next));
         }
         if address < 0 {
-            return (-4, 0);
+            return (-4, PeripheralResponse::default());
         }
         let Some((device, wrapped)) = self.devices.get_mut(&address) else {
-            return (-1, 0);
+            return (-1, PeripheralResponse::default());
         };
         let automatic = device.automatic();
         let callable = automatic || *wrapped;
-        let value = match operation {
-            Operation::Info => Some(1 | (i32::from(callable) << 1) | (i32::from(automatic) << 2)),
+        let response = match operation {
+            Operation::Info => Some(PeripheralResponse::number(
+                1 | (i32::from(callable) << 1) | (i32::from(automatic) << 2),
+            )),
             Operation::Wrap => {
                 *wrapped = true;
-                Some(1)
+                Some(PeripheralResponse::number(1))
             }
             Operation::Call(_, _, _) | Operation::CallString(_, _, _) if !callable => {
-                return (-2, 0)
+                return (-2, PeripheralResponse::default())
             }
-            Operation::Call(method, arg0, arg1) => device.call(method, arg0, arg1),
-            Operation::CallString(method, text, arg1) => device.call_string(method, &text, arg1),
+            Operation::Call(method, arg0, arg1) => device.invoke(method, arg0, arg1),
+            Operation::CallString(method, text, arg1) => device.invoke_string(method, &text, arg1),
             Operation::Scan => unreachable!(),
         };
-        value.map_or((-3, 0), |value| (2, value))
+        match response {
+            Some(response) if response.text.encode_utf16().count() <= MAX_TEXT_RESULT => {
+                (2, response)
+            }
+            Some(_) => (-4, PeripheralResponse::default()),
+            None => (-3, PeripheralResponse::default()),
+        }
     }
 }
