@@ -195,6 +195,21 @@ impl StorageSubsystem {
         }
     }
 
+    pub(crate) fn read_program_binary(&self, drive: usize) -> Result<Option<Vec<u8>>, String> {
+        let capacity = self.capacity(drive);
+        if capacity < 4 {
+            return Ok(None);
+        }
+        let mut header = [0; 4];
+        self.drives[drive].read(0, &mut header).map_err(|error| error.to_string())?;
+        if !crate::cpu::binary::has_magic(&header) {
+            return Ok(None);
+        }
+        let mut bytes = vec![0; capacity.min(16 * 1024 * 1024)];
+        self.drives[drive].read(0, &mut bytes).map_err(|error| error.to_string())?;
+        Ok(Some(bytes))
+    }
+
     pub(crate) fn read_program_text(&self, drive: usize) -> Option<Vec<String>> {
         let length = self.capacity(drive).min(4 * 1024 * 1024);
         if length == 0 {

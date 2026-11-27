@@ -110,8 +110,18 @@ Binary is output to `target/release/siliconcraft-emulator`.
 ## Usage
 
 ```bash
-siliconcraft-emulator [OPTIONS] <file.o | file.asm | file.n | file.n2 | project_dir>
+siliconcraft-emulator [OPTIONS] <file.sc | file.o | file.asm | file.n | file.n2 | project_dir>
 ```
+
+Run a program built with the standalone SiliconCraft compiler with
+`siliconcraft-emulator --headless program.sc`. The emulator accepts SCPK v3
+packages with or without metadata and raw SCBC v1 `.o` files. Compiled
+binaries run without the compiler or a Java runtime.
+
+`SEXEC` also loads either binary format from the beginning of an attached
+drive image. For example, attach `program.o` with `--drive 1:program.o` and
+run an assembly loader containing `SEXEC 1`. Use a copy of the binary if the
+guest will write to that drive.
 
 ### Options:
 - `--demo <name>`: Run one of the built-in demonstrations (`counter`, `fibonacci`, `jingle_bells`, `graphics`, `timer`)

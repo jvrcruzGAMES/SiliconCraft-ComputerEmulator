@@ -3,6 +3,7 @@ mod n2;
 pub mod project;
 pub mod instruction;
 pub mod assembler;
+pub mod binary;
 pub mod peripheral;
 pub mod network;
 mod heap;
@@ -115,6 +116,7 @@ pub struct VirtualCpu {
 
     pub rom: Vec<String>,
     pub program: Vec<String>,
+    binary_image: Option<binary::Image>,
     pub compiled_program: Vec<CompiledInstruction>,
     pub labels: HashMap<String, usize>,
     pub data_labels: HashMap<String, usize>,
@@ -173,6 +175,7 @@ impl VirtualCpu {
 
             rom: Vec::new(),
             program: Vec::new(),
+            binary_image: None,
             compiled_program: Vec::new(),
             labels: HashMap::new(),
             data_labels: HashMap::new(),
@@ -183,10 +186,39 @@ impl VirtualCpu {
 
     pub fn load_program(&mut self, source_lines: &[String]) {
         self.rom = source_lines.to_vec();
-        self.program = self.rom.clone();
+        self.install_program(self.rom.clone(), None);
+        self.power_on();
+    }
+
+    /// Load a SiliconCraft SCPK package or raw SCBC image into ROM.
+    pub fn load_binary(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let (program, image) = binary::Image::decode(bytes)?;
+        self.rom = program.clone();
+        self.install_program(program, Some(image));
+        self.power_on();
+        Ok(())
+    }
+
+    fn install_program(&mut self, program: Vec<String>, image: Option<binary::Image>) {
+        self.program = program;
+        self.binary_image = image;
         self.preprocess_labels();
         self.compile_bytecode();
-        self.power_on();
+    }
+
+    fn initialize_program_data(&mut self) {
+        if let Some(image) = &self.binary_image {
+            for (address, bytes) in &image.segments {
+                let Ok(address) = usize::try_from(*address) else { continue };
+                if let Some(target) = self.ram.as_mut_slice().get_mut(address..) {
+                    for (cell, &byte) in target.iter_mut().zip(bytes) {
+                        *cell = i32::from(byte);
+                    }
+                }
+            }
+        } else {
+            Assembler::load_static_data(&self.program, &mut self.ram, &mut self.labels, &mut self.data_labels, None);
+        }
     }
 
     pub fn burn_to_rom<T: AsRef<str>>(&mut self, source_lines: &[T]) {
@@ -376,13 +408,7 @@ impl VirtualCpu {
         self.audio.clear();
         self.start_time = Instant::now();
 
-        Assembler::load_static_data(
-            &self.program,
-            &mut self.ram,
-            &mut self.labels,
-            &mut self.data_labels,
-            None,
-        );
+        self.initialize_program_data();
 
         if self.state != State::Off {
             self.state = State::Running;
@@ -656,7 +682,7 @@ impl VirtualCpu {
             let op = t.chars().nth(idx).unwrap();
             let left = self.resolve_value(&t[..idx])?;
             let right = self.resolve_value(&t[idx + 1..])?;
-            return Ok(if op == '+' { left + right } else { left - right });
+            return Ok(if op == '+' { left.wrapping_add(right) } else { left.wrapping_sub(right) });
         }
         if let Some(idx) = Self::find_binary_op(t, &["*", "/", "%"]) {
             let op = t.chars().nth(idx).unwrap();
@@ -714,6 +740,9 @@ impl VirtualCpu {
     }
 
     pub fn resolve_target(&self, target: &str) -> Result<usize, String> {
+        if self.binary_image.is_some() {
+            return Ok(self.resolve_value(target)?.max(0) as usize);
+        }
         let t = target.trim();
         if let Some(r) = Register::from_str(t) {
             let v = self.reg(r);
@@ -1120,6 +1149,9 @@ impl VirtualCpu {
     }
 
     fn exec_op(&mut self, ci: &CompiledInstruction, line_num: usize) -> Result<(), String> {
+        if let Some(output) = self.binary_image.as_ref().and_then(|image| image.outputs.get(&line_num)).cloned() {
+            return self.exec_binary_output(ci, output);
+        }
         match ci.opcode {
             Opcode::NOP => Ok(()),
             Opcode::HLT => {
@@ -1216,7 +1248,7 @@ impl VirtualCpu {
                 if divisor == 0 {
                     return Err("Division by zero in DIV".to_string());
                 }
-                let res = cur / divisor;
+                let res = cur.wrapping_div(divisor);
                 self.set_destination(&parts[0], res)?;
                 self.update_flags(res);
                 Ok(())
@@ -1231,7 +1263,7 @@ impl VirtualCpu {
                 if divisor == 0 {
                     return Err("Modulo by zero in MOD".to_string());
                 }
-                let res = cur % divisor;
+                let res = cur.wrapping_rem(divisor);
                 self.set_destination(&parts[0], res)?;
                 self.update_flags(res);
                 Ok(())
@@ -1488,7 +1520,8 @@ impl VirtualCpu {
                     i32::MAX
                 };
                 let r = (std::time::SystemTime::now().elapsed().unwrap_or_default().as_nanos() % (max as u128)) as i32;
-                self.set_destination(&parts[0], r)
+                let dest = parts.first().ok_or("RAND requires a destination")?;
+                self.set_destination(dest, r)
             }
             Opcode::INPAD => {
                 let parts = Assembler::split_args(&ci.raw_args, 2);
@@ -1557,7 +1590,8 @@ impl VirtualCpu {
                     self.storage.selected_drive()
                 };
                 let capacity = self.storage.capacity(drive);
-                self.set_destination(&parts[0], capacity as i32)?;
+                let dest = parts.first().ok_or("SSIZE requires a destination")?;
+                self.set_destination(dest, capacity as i32)?;
                 self.flag_z = capacity == 0;
                 self.flag_s = false;
                 Ok(())
@@ -1618,14 +1652,22 @@ impl VirtualCpu {
                 if drive >= crate::hardware::storage::MAX_DRIVES {
                     return Err(format!("Drive index {drive} out of bounds"));
                 }
-                let program = self.storage.get_drive_program(drive).cloned()
-                    .or_else(|| self.storage.read_program_text(drive))
-                    .ok_or_else(|| format!("No executable program found on drive {drive}"))?;
+                let (program, image) = if let Some(program) = self.storage.get_drive_program(drive) {
+                    (program.clone(), None)
+                } else if let Some(bytes) = self.storage.read_program_binary(drive)? {
+                    let (program, image) = binary::Image::decode(&bytes)?;
+                    (program, Some(image))
+                } else {
+                    let program = self.storage.read_program_text(drive)
+                        .ok_or_else(|| format!("No executable program found on drive {drive}"))?;
+                    (program, None)
+                };
                 self.network_port.reset();
                 self.peripheral_bus.reset();
-                self.program = program;
-                self.preprocess_labels();
-                self.compile_bytecode();
+                self.install_program(program, image);
+                if self.binary_image.is_some() {
+                    self.initialize_program_data();
+                }
                 self.call_stack.clear();
                 self.pc = 0;
                 self.storage.select_drive(drive)?;
@@ -1810,6 +1852,37 @@ impl VirtualCpu {
             self.resolve_target(args)?
         };
         self.pc = dest.min(self.program.len());
+        Ok(())
+    }
+
+    fn exec_binary_output(&mut self, ci: &CompiledInstruction, output: binary::Output) -> Result<(), String> {
+        if ci.opcode == Opcode::OUTC {
+            if let Some(text) = output.literal {
+                for byte in text.bytes() {
+                    self.emit_character(i32::from(byte));
+                }
+            } else {
+                let value = self.resolve_value(&ci.raw_args)?;
+                self.emit_character(value);
+            }
+            return Ok(());
+        }
+
+        self.flush_utf8();
+        if let Some(text) = output.literal {
+            self.line_buffer.push_str(&text);
+        } else if !ci.raw_args.is_empty() {
+            let operand = Assembler::split_args(&ci.raw_args, 2);
+            let value = self.resolve_value(&operand[0])?;
+            if ci.opcode == Opcode::OUTH {
+                self.line_buffer.push_str(&format!("0x{value:X}"));
+            } else {
+                self.line_buffer.push_str(&value.to_string());
+            }
+        }
+        if output.newline {
+            self.flush_line_buffer();
+        }
         Ok(())
     }
 

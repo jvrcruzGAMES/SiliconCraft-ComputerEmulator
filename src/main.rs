@@ -4,9 +4,14 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use siliconcraft_emulator::{demos, VirtualCpu, State, ProjectResolver, NCompiler, run_emulator_window};
 
+enum ProgramInput {
+    Source(Vec<String>),
+    Binary(Vec<u8>),
+}
+
 fn print_help() {
     println!("SiliconCraft Virtual CPU Emulator");
-    println!("Usage: siliconcraft-emulator [OPTIONS] <file.o | file.asm | file.n | file.n2 | project_dir>");
+    println!("Usage: siliconcraft-emulator [OPTIONS] <file.sc | file.o | file.asm | file.n | file.n2 | project_dir>");
     println!();
     println!("Options:");
     println!("  --demo <name>             Run a built-in demo ({})", demos::list_demos().join(", "));
@@ -173,19 +178,35 @@ fn main() {
         i += 1;
     }
 
-    let (_title, source_lines) = if let Some(demo) = demo_name {
-        if let Some((desc, lines)) = demos::get_demo(&demo) {
-            (desc.to_string(), lines)
+    let program = if let Some(demo) = demo_name {
+        if let Some((_, lines)) = demos::get_demo(&demo) {
+            ProgramInput::Source(lines)
         } else {
             eprintln!("Unknown demo '{}'. Run with --list-demos to see available demos.", demo);
             return;
         }
     } else if let Some(path) = file_path {
         let p = Path::new(&path);
-        if p.is_dir() {
+        let extension = p.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let is_package = extension.eq_ignore_ascii_case("sc");
+        let binary = if !p.is_dir() && (is_package || extension.eq_ignore_ascii_case("o")) {
+            match fs::read(p) {
+                Ok(bytes) if is_package || siliconcraft_emulator::cpu::binary::has_magic(&bytes) => Some(bytes),
+                Ok(_) => None,
+                Err(error) => {
+                    eprintln!("Failed to read {path}: {error}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(bytes) = binary {
+            ProgramInput::Binary(bytes)
+        } else if p.is_dir() {
             match ProjectResolver::load_project_from_dir(p) {
                 Ok(files) => match ProjectResolver::compile_project(&files, None) {
-                    Ok(lines) => (path, lines),
+                    Ok(lines) => ProgramInput::Source(lines),
                     Err(e) => {
                         eprintln!("Compilation failed: {}", e);
                         return;
@@ -204,7 +225,7 @@ fn main() {
             if let Ok(files) = ProjectResolver::load_project_from_dir(parent_dir) {
                 if files.contains_key(&filename) {
                     match ProjectResolver::compile_project(&files, Some(&filename)) {
-                        Ok(lines) => resolved = Some((path.clone(), lines)),
+                        Ok(lines) => resolved = Some(ProgramInput::Source(lines)),
                         Err(error) if ProjectResolver::is_n2_file(&filename) => {
                             eprintln!("Compilation failed: {error}");
                             std::process::exit(1);
@@ -222,7 +243,7 @@ fn main() {
                         if ProjectResolver::is_n2_file(&filename) {
                             let project = std::collections::HashMap::from([(filename.clone(), raw_lines)]);
                             match ProjectResolver::compile_project(&project, Some(&filename)) {
-                                Ok(lines) => (path, lines),
+                                Ok(lines) => ProgramInput::Source(lines),
                                 Err(error) => {
                                     eprintln!("Compilation failed: {error}");
                                     std::process::exit(1);
@@ -230,14 +251,14 @@ fn main() {
                             }
                         } else if path.ends_with(".n") {
                             match NCompiler::compile(&raw_lines) {
-                                Ok(compiled) => (path, compiled),
+                                Ok(compiled) => ProgramInput::Source(compiled),
                                 Err(err) => {
                                     eprintln!("Compilation failed: {}", err);
                                     return;
                                 }
                             }
                         } else {
-                            (path, raw_lines)
+                            ProgramInput::Source(raw_lines)
                         }
                     }
                     Err(e) => {
@@ -279,7 +300,15 @@ fn main() {
             std::process::exit(2);
         }
     }
-    cpu.burn_to_rom(&source_lines); // Code burned to non-volatile ROM
+    match program {
+        ProgramInput::Source(lines) => cpu.burn_to_rom(&lines),
+        ProgramInput::Binary(bytes) => {
+            if let Err(error) = cpu.load_binary(&bytes) {
+                eprintln!("Could not load binary: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if step_mode {
         run_interactive_debugger(&mut cpu);
