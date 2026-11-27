@@ -275,6 +275,7 @@ fn main() {
     };
 
     let mut cpu = VirtualCpu::default();
+    cpu.audio.set_recording(save_audio.is_some() && (headless_mode || step_mode));
     for (slot, path) in drive_images {
         if let Err(error) = cpu.storage.attach_image(slot, Path::new(path)) {
             eprintln!("Could not attach drive {slot} from {path}: {error}");

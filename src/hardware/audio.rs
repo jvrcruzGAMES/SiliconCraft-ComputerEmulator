@@ -3,6 +3,7 @@ use std::io::Write;
 
 pub const AUDIO_SAMPLE_RATE: u32 = 8000;
 pub const AUDIO_BUFFER_CAPACITY: usize = 65536;
+pub const MAX_AUDIO_QUEUE: usize = 262_144;
 
 #[derive(Debug, Clone)]
 pub struct AudioSubsystem {
@@ -12,6 +13,7 @@ pub struct AudioSubsystem {
     count: usize,
     triggered: bool,
     recorded_samples: Vec<u8>,
+    recording: bool,
 }
 
 impl AudioSubsystem {
@@ -23,12 +25,16 @@ impl AudioSubsystem {
             count: 0,
             triggered: false,
             recorded_samples: Vec::new(),
+            recording: true,
         }
     }
 
     pub fn push_sample(&mut self, sample: u8) {
-        if self.count >= self.buffer.len() {
-            let new_len = self.buffer.len() * 2;
+        if self.count == MAX_AUDIO_QUEUE {
+            self.head = (self.head + 1) % self.buffer.len();
+            self.count -= 1;
+        } else if self.count == self.buffer.len() {
+            let new_len = (self.buffer.len() * 2).min(MAX_AUDIO_QUEUE);
             let mut new_buf = vec![128; new_len];
             for i in 0..self.count {
                 new_buf[i] = self.buffer[(self.head + i) % self.buffer.len()];
@@ -40,16 +46,26 @@ impl AudioSubsystem {
         self.buffer[self.tail] = sample;
         self.tail = (self.tail + 1) % self.buffer.len();
         self.count += 1;
-        self.recorded_samples.push(sample);
+        if self.recording {
+            self.recorded_samples.push(sample);
+        }
     }
 
     pub fn write_buffer(&mut self, ram: &super::ram::Ram, ram_src: usize, count: usize) {
-        let ram_slice = ram.as_slice();
-        for i in 0..count {
-            let addr = ram_src + i;
-            if addr < ram_slice.len() {
-                self.push_sample((ram_slice[addr] & 0xFF) as u8);
+        let words = ram.as_slice();
+        let end = ram_src.saturating_add(count).min(words.len());
+        let start = ram_src.max(end.saturating_sub(MAX_AUDIO_QUEUE));
+        if let Some(words) = words.get(start..end) {
+            for &word in words {
+                self.push_sample(word as u8);
             }
+        }
+    }
+
+    pub fn set_recording(&mut self, enabled: bool) {
+        self.recording = enabled;
+        if !enabled {
+            self.recorded_samples = Vec::new();
         }
     }
 
@@ -72,7 +88,8 @@ impl AudioSubsystem {
         if duration_ms <= 0 {
             return;
         }
-        let num_samples = ((AUDIO_SAMPLE_RATE as u64 * duration_ms as u64) / 1000) as usize;
+        let num_samples = (u64::from(AUDIO_SAMPLE_RATE) * duration_ms as u64 / 1000)
+            .min(MAX_AUDIO_QUEUE as u64) as usize;
         if freq <= 0 {
             // Silence / pause: 128 is center level in 8-bit unsigned PCM
             for _ in 0..num_samples {

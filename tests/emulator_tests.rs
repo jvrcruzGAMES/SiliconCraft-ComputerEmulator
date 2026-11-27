@@ -616,3 +616,60 @@ fn peripheral_text_instructions_use_utf16_and_consume_the_mailbox() {
     assert_eq!(cpu.ram.read(20), Ok(65));
     assert_eq!(cpu.ram.read(90), Ok(0));
 }
+
+#[test]
+fn cpu_limits_stack_depth_and_keeps_existing_entries_on_overflow() {
+    let mut cpu = VirtualCpu::new(32);
+    cpu.burn_to_rom(&["PUSHA", "HLT"]);
+    cpu.data_stack.resize(65_534, 17);
+    cpu.execute_cycles(10);
+    assert!(matches!(&cpu.state, State::Error(message) if message.contains("Data stack overflow")));
+    assert_eq!(cpu.data_stack.len(), 65_534);
+
+    cpu.burn_to_rom(&["CALL 0"]);
+    cpu.call_stack.resize(65_536, 0);
+    cpu.execute_cycles(10);
+    assert!(matches!(&cpu.state, State::Error(message) if message.contains("Call stack overflow")));
+    assert_eq!(cpu.call_stack.len(), 65_536);
+
+    cpu.burn_to_rom(&["IVEC 42, 1", "INT 42"]);
+    for _ in 0..1030 {
+        cpu.step();
+    }
+    assert_eq!(cpu.state, State::Error("Interrupt stack overflow".into()));
+    assert_eq!(cpu.interrupt_stack.len(), 1024);
+}
+
+#[test]
+fn audio_limits_pending_samples_and_keeps_newest_data() {
+    use siliconcraft_emulator::hardware::audio::{AudioSubsystem, MAX_AUDIO_QUEUE};
+
+    let mut audio = AudioSubsystem::new();
+    audio.set_recording(false);
+    audio.generate_tone(0, i32::MAX);
+    audio.push_sample(7);
+    assert_eq!(audio.stat(), MAX_AUDIO_QUEUE);
+
+    let samples = audio.poll_samples().unwrap();
+    assert_eq!(samples.len(), MAX_AUDIO_QUEUE);
+    assert!(samples[..MAX_AUDIO_QUEUE - 1].iter().all(|&sample| sample == 128));
+    assert_eq!(samples.last(), Some(&7));
+    assert!(audio.recorded_samples().is_empty());
+}
+
+#[test]
+fn terminal_flushes_long_continuations_and_limits_scrollback() {
+    let mut cpu = VirtualCpu::new(32);
+    let chunk = "é".repeat(2048);
+    cpu.burn_to_rom(&[format!("OUT \"{chunk}\", 0"), format!("OUT \"{chunk}\", 0")]);
+    cpu.execute_cycles(2);
+    assert_eq!(cpu.terminal_output, [chunk.repeat(2)]);
+    assert!(cpu.line_buffer.is_empty());
+
+    let lines = (0..70).map(|index| format!("OUT {index}")).collect::<Vec<_>>();
+    cpu.burn_to_rom(&lines);
+    cpu.execute_cycles(70);
+    assert_eq!(cpu.terminal_output.len(), 60);
+    assert_eq!(cpu.terminal_output.first().map(String::as_str), Some("10"));
+    assert_eq!(cpu.terminal_output.last().map(String::as_str), Some("69"));
+}

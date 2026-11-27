@@ -55,6 +55,11 @@ pub const VEC_MOUSE_CLICK: i32 = 12;
 pub const VEC_TIMER: i32 = 13;
 pub const VEC_RESET: i32 = 14;
 
+const MAX_STACK_DEPTH: usize = 65_536;
+const MAX_INTERRUPT_STACK_DEPTH: usize = 1024;
+const MAX_LINE_BUFFER: usize = 4096;
+const MAX_TERMINAL_LINES: usize = 60;
+
 const INSTRUCTIONS: &[&str] = &[
     "NOP", "MOV", "ADD", "SUB", "MUL", "DIV", "MOD", "INC", "DEC", "CMP",
     "AND", "OR", "XOR", "NOT", "SHL", "SHR", "JMP", "JZ", "JNZ", "JS",
@@ -584,6 +589,10 @@ impl VirtualCpu {
         }
         if let Some(event) = self.interrupt_queue.pop_front() {
             if let Some(&handler_pc) = self.ivt.get(&event.vector) {
+                if self.interrupt_stack.len() >= MAX_INTERRUPT_STACK_DEPTH {
+                    self.trigger_exception(VEC_STACK_FAULT, "Interrupt stack overflow", self.pc, "");
+                    return;
+                }
                 self.interrupt_stack.push(CpuContext {
                     pc: self.pc,
                     reg_a: self.reg_a,
@@ -605,6 +614,13 @@ impl VirtualCpu {
     }
 
     pub fn trigger_exception(&mut self, vector: i32, desc: &str, line_num: usize, code: &str) {
+        if self.interrupt_stack.len() >= MAX_INTERRUPT_STACK_DEPTH {
+            self.state = State::Error("Interrupt stack overflow".into());
+            self.flush_line_buffer();
+            self.terminal_output.push("[CPU EXCEPTION] Interrupt stack overflow".into());
+            self.trim_terminal_output();
+            return;
+        }
         if let Some(&handler_pc) = self.ivt.get(&vector) {
             self.interrupt_stack.push(CpuContext {
                 pc: self.pc,
@@ -630,6 +646,7 @@ impl VirtualCpu {
         self.flush_line_buffer();
         self.terminal_output.push(format!("[CPU EXCEPTION: Vector {}] {}", vector, desc));
         self.terminal_output.push(format!("Line {}: {}", line_num + 1, code));
+        self.trim_terminal_output();
     }
 
     pub fn resolve_value(&self, token: &str) -> Result<i32, String> {
@@ -794,6 +811,9 @@ impl VirtualCpu {
         self.check_timer_trigger();
         if self.sleep_ticks_remaining > 0 {
             self.check_and_dispatch_interrupt();
+            if matches!(self.state, State::Error(_)) {
+                return;
+            }
             if self.sleep_ticks_remaining > 0 {
                 self.sleep_ticks_remaining -= 1;
                 self.gpu.advance();
@@ -823,11 +843,15 @@ impl VirtualCpu {
         self.peripheral_bus.service();
         self.network_port.service();
         self.check_and_dispatch_interrupt();
+        if matches!(self.state, State::Error(_)) {
+            return;
+        }
 
         if self.pc >= self.program.len() {
             self.state = State::Halted;
             self.flush_line_buffer();
             self.terminal_output.push("[PROGRAM TERMINATED: END OF FILE]".to_string());
+            self.trim_terminal_output();
             return;
         }
 
@@ -857,9 +881,7 @@ impl VirtualCpu {
             self.trigger_exception(vec, &e, line_num, &ci.raw_line);
         }
 
-        if self.terminal_output.len() > 100 {
-            self.terminal_output.remove(0);
-        }
+        self.trim_terminal_output();
     }
 
     fn submit_peripheral(&mut self, opcode: Opcode, args: &str) -> Result<(), String> {
@@ -1368,6 +1390,9 @@ impl VirtualCpu {
                 } else {
                     self.resolve_target(&ci.raw_args)?
                 };
+                if self.call_stack.len() >= MAX_STACK_DEPTH {
+                    return Err("Call stack overflow".into());
+                }
                 self.call_stack.push(self.pc);
                 self.pc = dest.min(self.program.len());
                 Ok(())
@@ -1386,8 +1411,7 @@ impl VirtualCpu {
                     Operand::Imm(imm) => *imm,
                     _ => self.resolve_value(&ci.raw_args)?,
                 };
-                self.data_stack.push(val);
-                Ok(())
+                self.push_data(&[val])
             }
             Opcode::POP => {
                 if let Some(val) = self.data_stack.pop() {
@@ -1402,13 +1426,7 @@ impl VirtualCpu {
                     Err("POP on empty stack: Data stack underflow".to_string())
                 }
             }
-            Opcode::PUSHA => {
-                self.data_stack.push(self.reg_a);
-                self.data_stack.push(self.reg_b);
-                self.data_stack.push(self.reg_c);
-                self.data_stack.push(self.reg_d);
-                Ok(())
-            }
+            Opcode::PUSHA => self.push_data(&[self.reg_a, self.reg_b, self.reg_c, self.reg_d]),
             Opcode::POPA => {
                 if self.data_stack.len() < 4 {
                     return Err("Data stack underflow on POPA".to_string());
@@ -1456,6 +1474,10 @@ impl VirtualCpu {
             }
             Opcode::INT => {
                 let vec = self.parse_vector(&ci.raw_args)?;
+                if self.interrupt_stack.len() >= MAX_INTERRUPT_STACK_DEPTH {
+                    self.trigger_exception(VEC_STACK_FAULT, "Interrupt stack overflow", line_num, &ci.raw_line);
+                    return Ok(());
+                }
                 if let Some(&handler_pc) = self.ivt.get(&vec) {
                     self.interrupt_stack.push(CpuContext {
                         pc: self.pc,
@@ -1855,6 +1877,26 @@ impl VirtualCpu {
         Ok(())
     }
 
+    fn push_data(&mut self, values: &[i32]) -> Result<(), String> {
+        if self.data_stack.len() > MAX_STACK_DEPTH - values.len() {
+            return Err("Data stack overflow".into());
+        }
+        self.data_stack.extend_from_slice(values);
+        Ok(())
+    }
+
+    fn trim_terminal_output(&mut self) {
+        let excess = self.terminal_output.len().saturating_sub(MAX_TERMINAL_LINES);
+        if excess != 0 {
+            self.terminal_output.drain(..excess);
+        }
+    }
+
+    fn line_buffer_full(&self) -> bool {
+        self.line_buffer.len() >= MAX_LINE_BUFFER
+            && self.line_buffer.encode_utf16().take(MAX_LINE_BUFFER).count() == MAX_LINE_BUFFER
+    }
+
     fn exec_binary_output(&mut self, ci: &CompiledInstruction, output: binary::Output) -> Result<(), String> {
         if ci.opcode == Opcode::OUTC {
             if let Some(text) = output.literal {
@@ -1880,7 +1922,7 @@ impl VirtualCpu {
                 self.line_buffer.push_str(&value.to_string());
             }
         }
-        if output.newline {
+        if output.newline || self.line_buffer_full() {
             self.flush_line_buffer();
         }
         Ok(())
@@ -1908,7 +1950,7 @@ impl VirtualCpu {
             self.line_buffer.push_str(&val.to_string());
         }
 
-        if newline {
+        if newline || self.line_buffer_full() {
             self.flush_line_buffer();
         }
         Ok(())
